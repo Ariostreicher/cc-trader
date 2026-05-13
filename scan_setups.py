@@ -135,9 +135,20 @@ def swing_pivots(df: pd.DataFrame, n: int = 5) -> List[Pivot]:
 
 
 def support_resistance(df: pd.DataFrame, n: int = 5, tol_pct: float = 0.5):
+    """Classify swing levels as support/resistance RELATIVE TO CURRENT PRICE.
+
+    In a downtrend, what was a 'swing low' months ago is now ABOVE current
+    price — that's resistance on the way back up, not support. The correct
+    classification is positional, not directional:
+        level < current_price  →  support
+        level > current_price  →  resistance
+    """
+    if df is None or df.empty:
+        return {"resistance": [], "support": []}
+    current_price = float(df["close"].iloc[-1])
     pivots = swing_pivots(df, n)
-    highs = sorted([p.price for p in pivots if p.kind == "high"])
-    lows = sorted([p.price for p in pivots if p.kind == "low"])
+    # ALL swing levels are potential S/R — let position vs current price decide.
+    all_levels = sorted({p.price for p in pivots})
 
     def cluster(vs):
         if not vs:
@@ -151,7 +162,9 @@ def support_resistance(df: pd.DataFrame, n: int = 5, tol_pct: float = 0.5):
                 out.append([v])
         return [round(sum(c) / len(c), 4) for c in out]
 
-    return {"resistance": cluster(highs), "support": cluster(lows)}
+    supports = cluster([v for v in all_levels if v < current_price])
+    resistances = cluster([v for v in all_levels if v > current_price])
+    return {"support": supports, "resistance": resistances}
 
 
 # ---------------------------------------------------------------------------
@@ -792,8 +805,16 @@ Write your senior-trader review now."""
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
         return data["choices"][0]["message"]["content"].strip()
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return ("(Senior Trader voice is offline — the Groq API key on the server "
+                    "is missing, invalid, or revoked. Set OPENAI_API_KEY in the Render "
+                    "dashboard → Environment tab with a fresh key from console.groq.com.)")
+        if e.code == 429:
+            return "(Senior Trader voice paused — Groq daily quota hit. Resets at midnight UTC.)"
+        return f"(AI commentary unavailable: HTTP {e.code})"
     except Exception as e:
-        return f"(AI commentary unavailable: {e})"
+        return f"(AI commentary unavailable: {type(e).__name__})"
 
 
 def _load_groq_config() -> tuple[str, str]:
@@ -916,15 +937,61 @@ def _render_flags(flags: list[ContextFlag]) -> str:
 
 def _tv_symbol(yahoo_symbol: str) -> str:
     """Map a yfinance ticker to a TradingView-compatible symbol.
-    BTC-USD -> COINBASE:BTCUSD, AAPL -> NASDAQ:AAPL, etc.
-    Falls back to bare symbol so TradingView auto-resolves.
+
+    For crypto (-USD), use COINBASE:XXXUSD which TradingView knows.
+    For ALL other stocks/ETFs, pass the bare ticker — TradingView's widget
+    auto-resolves to the correct exchange (NYSE, NASDAQ, ARCA, etc.).
     """
     s = yahoo_symbol.upper()
     if s.endswith("-USD"):
         return f"COINBASE:{s.replace('-', '')}"
-    nasdaq = {"GOOGL", "AVGO", "KLAC", "PANW", "SNPS", "VLY", "ROKU", "DKNG", "CELH", "SBUX",
-              "RVMD", "FOLD", "XENE", "UAL", "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META"}
-    return f"NASDAQ:{s}" if s in nasdaq else f"NYSE:{s}"
+    # Don't hardcode an exchange — TradingView's widget will auto-resolve.
+    return s
+
+
+# Common-name → yfinance-ticker resolver. Maps things people actually type.
+TICKER_ALIASES = {
+    # Crypto
+    "BITCOIN": "BTC-USD", "BTC": "BTC-USD",
+    "ETHEREUM": "ETH-USD", "ETHER": "ETH-USD", "ETH": "ETH-USD",
+    "SOLANA": "SOL-USD", "SOL": "SOL-USD",
+    "DOGECOIN": "DOGE-USD", "DOGE": "DOGE-USD",
+    "RIPPLE": "XRP-USD", "XRP": "XRP-USD",
+    "CARDANO": "ADA-USD", "ADA": "ADA-USD",
+    "BNB": "BNB-USD", "BINANCE": "BNB-USD",
+    "POLKADOT": "DOT-USD", "DOT": "DOT-USD",
+    "LITECOIN": "LTC-USD", "LTC": "LTC-USD",
+    "AVAX": "AVAX-USD", "AVALANCHE": "AVAX-USD",
+    "MATIC": "MATIC-USD", "POLYGON": "MATIC-USD",
+    "LINK": "LINK-USD", "CHAINLINK": "LINK-USD",
+    # Common stock aliases
+    "GOOGLE": "GOOGL", "ALPHABET": "GOOGL",
+    "APPLE": "AAPL",
+    "TESLA": "TSLA",
+    "MICROSOFT": "MSFT",
+    "NVIDIA": "NVDA",
+    "AMAZON": "AMZN",
+    "META": "META", "FACEBOOK": "META",
+    "GOLD": "GLD", "ORO": "GLD",
+    "SILVER": "SLV",
+    "SPY": "SPY", "S&P": "SPY", "SP500": "SPY",
+    "QQQ": "QQQ", "NASDAQ": "QQQ",
+    "VIX": "^VIX",
+}
+
+
+def resolve_ticker(query: str) -> str:
+    """Map free-form search input to a real yfinance ticker.
+    - 'bitcoin' / 'btc' / 'BTC' → 'BTC-USD'
+    - 'apple' → 'AAPL'
+    - 'GLD' / 'gld' → 'GLD'  (already valid, just uppercased)
+    """
+    q = query.strip().upper()
+    if not q:
+        return q
+    if q in TICKER_ALIASES:
+        return TICKER_ALIASES[q]
+    return q
 
 
 def render_html(
@@ -983,6 +1050,15 @@ def render_html(
     for label, color in [("STRONG TAKE", "#22c55e"), ("TAKE", "#86efac"), ("MARGINAL", "#f59e0b"), ("AVOID", "#ef4444")]:
         n = verdict_counts.get(label, 0)
         legend_html += f'<span class="legend-pill" style="background:{color};color:#000">{label} · {n}</span>'
+
+    # Autocomplete suggestions: every alias key + the watchlist itself.
+    # Browser shows these as a dropdown when the user types in the search box.
+    _suggestion_set: set[str] = set(TICKER_ALIASES.keys()) | set(TICKER_ALIASES.values())
+    _suggestion_set |= {s.symbol for s in setups_sorted}
+    _suggestion_set |= {s.symbol for s in snapshots}
+    ticker_suggestions_html = "".join(
+        f'<option value="{sym}"></option>' for sym in sorted(_suggestion_set) if sym
+    )
 
     # --- One TradingView widget per ticker with a setup
     charts = []
@@ -1209,7 +1285,9 @@ def render_html(
 
   <div class="topbar">
     <form method="GET" action="/" class="search-form">
-      <input name="symbols" id="search-input" placeholder="🔍 Scan ad-hoc tickers (e.g. AAPL, BTC-USD, DOGE-USD, ETH-USD)" autocomplete="off"/>
+      <input name="symbols" id="search-input" list="ticker-suggestions"
+             placeholder="🔍 Scan ad-hoc — type 'bitcoin', 'apple', 'GLD', 'AAPL', 'BTC-USD'..." autocomplete="off"/>
+      <datalist id="ticker-suggestions">{ticker_suggestions_html}</datalist>
       <button type="submit">Scan</button>
       <a href="/" class="reset-link">↩ Default watchlist</a>
     </form>
@@ -1567,7 +1645,9 @@ def serve_live(tickers: list[str], port: int, refresh_seconds: int, cache_second
                 # Ad-hoc scan: ?symbols=AAPL,TSLA,BTC-USD
                 adhoc = qs.get("symbols", [""])[0].strip()
                 if adhoc:
-                    custom = [s.strip().upper() for s in adhoc.split(",") if s.strip()]
+                    # Resolve common names (bitcoin → BTC-USD, apple → AAPL, gold → GLD)
+                    custom = [resolve_ticker(s) for s in adhoc.split(",") if s.strip()]
+                    custom = [s for s in custom if s]
                     if custom:
                         print(f"  → Ad-hoc scan of {len(custom)} ticker(s): {custom}")
                         # always_show=True so the user sees a chart even when
