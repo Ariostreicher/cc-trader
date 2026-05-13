@@ -1138,6 +1138,24 @@ def resolve_ticker(query: str) -> str:
     return q
 
 
+def _snap_chart_body(snap, idx: int, chart_data_by_symbol: dict) -> str:
+    """Lightweight Charts container for a snapshot card (no setup), with
+    only S/R + EMA overlays — no entry/stop/target lines."""
+    import json as _json
+    sym = snap.symbol
+    if sym not in chart_data_by_symbol:
+        return '<div class="lwc-fallback">📉 Chart data unavailable — try refreshing.</div>'
+    lines: list[dict] = []
+    for sup in (snap.support_levels or [])[-3:]:
+        lines.append({"price": sup, "color": "#22c55e88", "lineStyle": 2, "lineWidth": 1, "title": f"S ${sup:.2f}"})
+    for res in (snap.resistance_levels or [])[-3:]:
+        lines.append({"price": res, "color": "#ef444488", "lineStyle": 2, "lineWidth": 1, "title": f"R ${res:.2f}"})
+    return (
+        f'<div class="lwc-chart" id="lwc_snap_{idx}" data-symbol="{sym}" '
+        f"data-lines='{_json.dumps(lines)}'></div>"
+    )
+
+
 _AI_OFFLINE_BLOCK = (
     '<div class="ai-voice ai-offline">'
     '<div class="ai-head">🎯 Senior Trader Read</div>'
@@ -1201,10 +1219,12 @@ def render_html(
     snapshots: Optional[list["Snapshot"]] = None,
     levels_by_symbol: Optional[dict] = None,
     watches: Optional[list] = None,
+    chart_data_by_symbol: Optional[dict] = None,
 ) -> str:
     snapshots = snapshots or []
     levels_by_symbol = levels_by_symbol or {}
     watches = watches or []
+    chart_data_by_symbol = chart_data_by_symbol or {}
     # Sort: STRONG TAKE first, then TAKE, MARGINAL, AVOID. Within each, conviction × R:R desc.
     setups_sorted = sorted(
         setups,
@@ -1264,7 +1284,28 @@ def render_html(
         f'<option value="{sym}"></option>' for sym in sorted(_suggestion_set) if sym
     )
 
-    # --- One TradingView widget per ticker with a setup
+    import json as _json2
+
+    def _chart_price_lines(s_list: list, snap: Optional["Snapshot"]) -> list[dict]:
+        """Build the list of horizontal price lines for a Lightweight Charts pane.
+        Combines all setups' entry/stop/targets PLUS support/resistance from snap.
+        Each line: {price, color, lineStyle (0=solid,2=dashed), lineWidth, title}.
+        """
+        lines: list[dict] = []
+        for s in s_list:
+            tone = "#22c55e" if s.direction == "long" else "#ef4444"
+            lines.append({"price": s.entry,     "color": "#fbbf24", "lineStyle": 0, "lineWidth": 2, "title": f"Entry ${s.entry:.2f}"})
+            lines.append({"price": s.stop_loss, "color": "#ef4444", "lineStyle": 0, "lineWidth": 2, "title": f"Stop ${s.stop_loss:.2f}"})
+            for ti, t in enumerate(s.targets[:2], 1):
+                lines.append({"price": t,       "color": "#22c55e", "lineStyle": 2, "lineWidth": 2, "title": f"T{ti} ${t:.2f}"})
+        if snap is not None:
+            for sup in (snap.support_levels or [])[-3:]:
+                lines.append({"price": sup, "color": "#22c55e88", "lineStyle": 2, "lineWidth": 1, "title": f"S ${sup:.2f}"})
+            for res in (snap.resistance_levels or [])[-3:]:
+                lines.append({"price": res, "color": "#ef444488", "lineStyle": 2, "lineWidth": 1, "title": f"R ${res:.2f}"})
+        return lines
+
+    # --- One Lightweight Charts chart per ticker with a setup
     charts = []
     seen_symbols: set[str] = set()
     for i, s in enumerate(setups_sorted):
@@ -1272,6 +1313,9 @@ def render_html(
             continue
         seen_symbols.add(s.symbol)
         tv = _tv_symbol(s.symbol)
+        ticker_setups_all = [x for x in setups_sorted if x.symbol == s.symbol]
+        snap_for_chart = levels_by_symbol.get(s.symbol)
+        price_lines_json = _json2.dumps(_chart_price_lines(ticker_setups_all, snap_for_chart))
         # Collect ALL setups for this ticker
         ticker_setups = [x for x in setups_sorted if x.symbol == s.symbol]
         levels_html = ""
@@ -1299,44 +1343,20 @@ def render_html(
               {(_ai_voice_block(ts.ai_analysis))}
             </div>
             """
+        has_data = s.symbol in chart_data_by_symbol
+        chart_body = (
+            f'<div class="lwc-chart" id="lwc_{i}" data-symbol="{s.symbol}" '
+            f"data-lines='{price_lines_json}'></div>"
+            if has_data
+            else '<div class="lwc-fallback">📉 Chart data unavailable — try refreshing.</div>'
+        )
         charts.append(f"""
         <div class="ticker-block" id="chart-{i}">
           <h2>{s.symbol} <span class="tv-link">·
             <a href="https://www.tradingview.com/chart/?symbol={tv}" target="_blank">open on TradingView →</a>
           </span></h2>
           <div class="chart-row">
-            <div class="tv-widget-wrap">
-              <div class="tradingview-widget-container">
-                <div id="tv_{i}"></div>
-                <script type="text/javascript">
-                  new TradingView.widget({{
-                    "container_id": "tv_{i}",
-                    "autosize": true,
-                    "symbol": "{tv}",
-                    "interval": "D",
-                    "timezone": "America/New_York",
-                    "theme": "dark",
-                    "style": "1",
-                    "locale": "en",
-                    "toolbar_bg": "#0a0f1c",
-                    "enable_publishing": false,
-                    "hide_top_toolbar": false,
-                    "hide_legend": false,
-                    "save_image": false,
-                    "studies": [
-                      "MAExp@tv-basicstudies",
-                      "MAExp@tv-basicstudies",
-                      "MAExp@tv-basicstudies",
-                      "RSI@tv-basicstudies"
-                    ],
-                    "studies_overrides": {{
-                      "moving average exponential.length": 55,
-                      "moving average exponential.color": "#94a3b8"
-                    }}
-                  }});
-                </script>
-              </div>
-            </div>
+            <div class="lwc-wrap">{chart_body}<div class="lwc-legend" id="lg_{i}"></div></div>
             <div class="setups-side">{levels_html}</div>
           </div>
         </div>
@@ -1415,22 +1435,7 @@ def render_html(
             <a href="https://www.tradingview.com/chart/?symbol={tv}" target="_blank">open on TradingView →</a>
           </span></h2>
           <div class="chart-row">
-            <div class="tv-widget-wrap">
-              <div class="tradingview-widget-container">
-                <div id="tv_snap_{snap_idx}"></div>
-                <script type="text/javascript">
-                  new TradingView.widget({{
-                    "container_id": "tv_snap_{snap_idx}",
-                    "autosize": true,
-                    "symbol": "{tv}",
-                    "interval": "D", "timezone": "America/New_York",
-                    "theme": "dark", "style": "1", "locale": "en",
-                    "toolbar_bg": "#0a0f1c", "enable_publishing": false,
-                    "studies": ["MAExp@tv-basicstudies","MAExp@tv-basicstudies","MAExp@tv-basicstudies","RSI@tv-basicstudies"]
-                  }});
-                </script>
-              </div>
-            </div>
+            <div class="lwc-wrap">{_snap_chart_body(snap, snap_idx, chart_data_by_symbol)}<div class="lwc-legend" id="lg_snap_{snap_idx}"></div></div>
             <div class="setups-side">
               <div class="setup-card">
                 <div class="setup-head" style="color:#94a3b8">📊 Live snapshot · CC context</div>
@@ -1447,10 +1452,13 @@ def render_html(
         snap_idx += 1
     snapshots_html = "\n".join(snap_blocks)
 
+    # Encode all chart data into a single global JS object.
+    chart_data_json = _json2.dumps(chart_data_by_symbol, default=float)
+
     return f"""<!doctype html>
 <html><head><meta charset="utf-8">
 <title>CC Trader — Live Setups</title>
-<script src="https://s3.tradingview.com/tv.js"></script>
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 <style>
   body {{ font-family: -apple-system, system-ui, sans-serif; background:#0a0f1c; color:#e2e8f0; margin:0; padding:24px; }}
   h1 {{ margin:0 0 4px 0; font-size:24px; }}
@@ -1467,10 +1475,15 @@ def render_html(
   .ticker-block {{ background:#0f172a; border-radius:12px; padding:16px; margin-top:18px; }}
   .chart-row {{ display:grid; grid-template-columns: minmax(0, 1fr) 380px; gap:16px; }}
   @media (max-width: 1100px) {{ .chart-row {{ grid-template-columns: 1fr; }} }}
-  .tv-widget-wrap {{ background:#0a0f1c; border-radius:8px; overflow:hidden; min-height:720px; }}
-  .tradingview-widget-container {{ height:720px; width:100%; }}
-  .tradingview-widget-container > div {{ height:720px !important; width:100% !important; }}
-  .tradingview-widget-container iframe {{ height:720px !important; width:100% !important; border:0 !important; }}
+
+  /* Lightweight Charts container — entry/stop/targets drawn directly */
+  .lwc-wrap {{ background:#0a0f1c; border-radius:8px; padding:8px; position:relative; }}
+  .lwc-chart {{ height:560px; width:100%; }}
+  .lwc-fallback {{ height:560px; display:flex; align-items:center; justify-content:center; color:#64748b; font-size:13px; }}
+  .lwc-legend {{ position:absolute; left:14px; top:14px; background:rgba(15,23,42,0.78); border:1px solid #1e293b; border-radius:6px; padding:6px 10px; font-size:11px; font-family:ui-monospace,monospace; color:#94a3b8; pointer-events:none; line-height:1.6; }}
+  .lwc-legend .lg-row {{ display:flex; gap:8px; align-items:center; }}
+  .lwc-legend .lg-dot {{ width:8px; height:2px; border-radius:1px; display:inline-block; }}
+  .lwc-legend .lg-px {{ color:#fbbf24; font-weight:700; }}
 
   .setups-side {{ display:flex; flex-direction:column; gap:10px; }}
   .setup-card {{ background:#0a0f1c; border:1px solid #1e293b; border-radius:8px; padding:12px; }}
@@ -1627,6 +1640,98 @@ def render_html(
   <script>
     // Map of current prices from this scan, exposed for client-side alarm checks.
     window.cc_prices = {price_map_json};
+    // OHLCV + EMA series per symbol, used by Lightweight Charts on this page.
+    window.cc_charts_data = {chart_data_json};
+
+    // ---- Lightweight Charts init -----------------------------------------
+    function _fmtNum(n) {{ return (n || 0).toFixed(2); }}
+    function initLightweightCharts() {{
+      if (typeof LightweightCharts === 'undefined') {{
+        console.warn('LightweightCharts library not loaded');
+        return;
+      }}
+      document.querySelectorAll('.lwc-chart').forEach(function(div) {{
+        var sym = div.getAttribute('data-symbol');
+        var data = window.cc_charts_data[sym];
+        if (!data || !data.candles || !data.candles.length) {{
+          div.innerHTML = '<div style="padding:30px;color:#64748b">No chart data for ' + sym + '</div>';
+          return;
+        }}
+        var chart = LightweightCharts.createChart(div, {{
+          layout:        {{ background: {{ type:'solid', color:'#0a0f1c' }}, textColor:'#94a3b8' }},
+          grid:          {{ vertLines: {{ color:'#1e293b' }}, horzLines: {{ color:'#1e293b' }} }},
+          rightPriceScale: {{ borderColor:'#1e293b' }},
+          timeScale:     {{ borderColor:'#1e293b', timeVisible:false }},
+          crosshair:     {{ mode: 1 }},
+          autoSize:      true,
+        }});
+        var candleSeries = chart.addCandlestickSeries({{
+          upColor:'#22c55e', downColor:'#ef4444',
+          borderUpColor:'#22c55e', borderDownColor:'#ef4444',
+          wickUpColor:'#22c55e', wickDownColor:'#ef4444',
+        }});
+        candleSeries.setData(data.candles);
+
+        // Volume — separate scale at bottom
+        var volSeries = chart.addHistogramSeries({{
+          priceFormat: {{ type:'volume' }},
+          priceScaleId: '',
+          color:'#22c55e55',
+        }});
+        volSeries.priceScale().applyOptions({{ scaleMargins: {{ top:0.85, bottom:0 }} }});
+        if (data.volume && data.volume.length) volSeries.setData(data.volume);
+
+        // EMA overlays
+        function addEMA(series, color, title) {{
+          if (!series || !series.length) return null;
+          var s = chart.addLineSeries({{
+            color: color, lineWidth: 1, title: title,
+            lastValueVisible:false, priceLineVisible:false,
+          }});
+          s.setData(series);
+          return s;
+        }}
+        addEMA(data.ema_55,  '#94a3b8', 'EMA 55');
+        addEMA(data.ema_100, '#cbd5e1', 'EMA 100');
+        addEMA(data.ema_200, '#64748b', 'EMA 200');
+
+        // Horizontal price-lines: entry, stop, targets, S/R
+        var rawLines = div.getAttribute('data-lines') || '[]';
+        var lines;
+        try {{ lines = JSON.parse(rawLines); }} catch(_) {{ lines = []; }}
+        lines.forEach(function(l) {{
+          candleSeries.createPriceLine({{
+            price: l.price,
+            color: l.color,
+            lineWidth: l.lineWidth || 2,
+            lineStyle: l.lineStyle === 2 ? LightweightCharts.LineStyle.Dashed : LightweightCharts.LineStyle.Solid,
+            axisLabelVisible: true,
+            title: l.title || '',
+          }});
+        }});
+
+        // Legend in the top-left of this chart
+        var legendId = div.id.replace('lwc_', 'lg_');
+        var legend = document.getElementById(legendId);
+        if (legend) {{
+          var legendRows = '<div class="lg-row"><span class="lg-dot" style="background:#22c55e"></span> Bull candle</div>'
+                         + '<div class="lg-row"><span class="lg-dot" style="background:#94a3b8"></span> EMA 55</div>'
+                         + '<div class="lg-row"><span class="lg-dot" style="background:#cbd5e1"></span> EMA 100</div>'
+                         + '<div class="lg-row"><span class="lg-dot" style="background:#64748b"></span> EMA 200</div>';
+          if (lines.length) {{
+            legend.innerHTML = legendRows + '<div class="lg-row"><span class="lg-px">' + sym + '</span></div>';
+          }} else {{
+            legend.innerHTML = legendRows;
+          }}
+        }}
+
+        chart.timeScale().fitContent();
+        // Resize chart when window resizes
+        new ResizeObserver(function() {{
+          chart.applyOptions({{ width: div.clientWidth, height: div.clientHeight }});
+        }}).observe(div);
+      }});
+    }}
 
     function getStars()  {{ try {{ return JSON.parse(localStorage.getItem('cc_stars')  || '[]'); }} catch(_) {{ return []; }} }}
     function getAlarms() {{ try {{ return JSON.parse(localStorage.getItem('cc_alarms') || '[]'); }} catch(_) {{ return []; }} }}
@@ -1805,6 +1910,7 @@ def render_html(
       applyFilter();
       checkAlarms();
       renderMyListBar();
+      initLightweightCharts();
       if (Notification.permission === 'default') Notification.requestPermission();
     }});
   </script>
@@ -1878,7 +1984,46 @@ def run_full_scan(
     all_setups: list[Setup] = []
     snapshots: list[Snapshot] = []     # ad-hoc "no setup" snapshots
     levels_by_symbol: dict[str, Snapshot] = {}  # key-levels for EVERY ticker
+    chart_data_by_symbol: dict[str, dict] = {}  # OHLCV + EMA arrays for charting
     all_watches: list[WatchItem] = []
+
+    def _build_chart_data(sym_u: str, daily_df: pd.DataFrame) -> dict:
+        """Serialize the last ~250 daily bars + EMA overlays for Lightweight Charts.
+        Format follows lightweight-charts' time-and-value convention:
+          candles: [{time, open, high, low, close}, ...]
+          volume:  [{time, value, color}, ...]
+          ema_55 / ema_100 / ema_200: [{time, value}, ...]   (NaN entries dropped)
+        """
+        d = daily_df.tail(260).copy()
+        # Time is YYYY-MM-DD strings — lightweight-charts accepts those for daily bars.
+        times = [t.strftime("%Y-%m-%d") if hasattr(t, "strftime") else str(t) for t in d.index]
+        candles = []
+        for ts, row in zip(times, d.itertuples(index=False)):
+            o, h, l, c = float(row.open), float(row.high), float(row.low), float(row.close)
+            candles.append({"time": ts, "open": o, "high": h, "low": l, "close": c})
+        # Volume series with green/red coloring vs prior close.
+        vols = []
+        prev_c = None
+        for ts, row in zip(times, d.itertuples(index=False)):
+            v = float(row.volume) if not pd.isna(row.volume) else 0
+            color = "#22c55e55" if (prev_c is None or row.close >= prev_c) else "#ef444455"
+            vols.append({"time": ts, "value": v, "color": color})
+            prev_c = row.close
+        close_s = d["close"]
+        def _ema_series(length: int) -> list[dict]:
+            s = ema(close_s, length)
+            out = []
+            for ts, v in zip(times, s.values):
+                if pd.notna(v):
+                    out.append({"time": ts, "value": float(v)})
+            return out
+        return {
+            "candles": candles,
+            "volume":  vols,
+            "ema_55":  _ema_series(55)  if len(close_s) > 55  else [],
+            "ema_100": _ema_series(100) if len(close_s) > 100 else [],
+            "ema_200": _ema_series(200) if len(close_s) > 200 else [],
+        }
 
     def _build_snapshot(sym_u: str, daily_df: pd.DataFrame, weekly_df, etf_u: str) -> Snapshot:
         close = daily_df["close"]
@@ -1932,6 +2077,13 @@ def run_full_scan(
         if daily_df is not None and not daily_df.empty:
             snap_levels = _build_snapshot(sym_u, daily_df, weekly_df, etf)
             levels_by_symbol[sym_u] = snap_levels
+            # Serialize chart data for any ticker that will get a chart card
+            # (i.e., has setups OR will be a snapshot card).
+            if setups or always_show:
+                try:
+                    chart_data_by_symbol[sym_u] = _build_chart_data(sym_u, daily_df)
+                except Exception as e:
+                    print(f"    [warn] chart data build failed for {sym_u}: {e}")
             # Forming-setup detection runs on every ticker.
             try:
                 watches = find_watches(sym_u, daily_df)
@@ -1965,6 +2117,7 @@ def run_full_scan(
         snapshots=snapshots,
         levels_by_symbol=levels_by_symbol,
         watches=all_watches,
+        chart_data_by_symbol=chart_data_by_symbol,
     )
     print(f"✓ Scan complete: {len(all_setups)} setup(s), {len(snapshots)} snapshot(s), {len(all_watches)} watch(es) in {duration:.1f}s\n")
     return all_setups, duration, html
