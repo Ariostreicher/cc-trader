@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  background-color: hsl(220 24% 7%);
+  color: hsl(0 0% 98%);
+  font-family: ui-sans-serif, system-ui, "Inter", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Form elements inherit colors so they look right on a dark canvas. */
+input,
+select,
+textarea,
+button {
+  font: inherit;
+  color: inherit;
+}
