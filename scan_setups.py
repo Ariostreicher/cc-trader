@@ -470,6 +470,150 @@ DETECTORS = [
 
 
 # ---------------------------------------------------------------------------
+# Forming / "Watching" detectors — same CC patterns, but BEFORE they fire.
+# When a setup is 1–5 trading days away from triggering, we want to surface
+# it so the operator can prepare. Each returns a list[WatchItem] with the
+# nearest level, the distance %, and what to wait for.
+# ---------------------------------------------------------------------------
+@dataclass
+class WatchItem:
+    symbol: str
+    signal: str               # "EMA pullback forming", "3rd touch pending", etc.
+    direction: str            # "long" / "short"
+    level: float              # the price level to watch
+    current_price: float
+    distance_pct: float       # +ve = level above price, -ve = below
+    waiting_for: str          # "close near $X.XX from above" — what triggers it
+    citation: str
+    bars_estimate: int = 0    # rough estimate of bars until trigger (heuristic)
+
+
+def _distance_pct(level: float, current: float) -> float:
+    if current <= 0:
+        return 0.0
+    return (level - current) / current * 100.0
+
+
+def find_watches(symbol: str, df: Optional[pd.DataFrame]) -> List[WatchItem]:
+    """For each scanned ticker, find CC setups that are CLOSE to firing.
+    Returns a list of WatchItems — these are not triggers, they are alerts
+    for setups forming in the next few bars."""
+    if df is None or df.empty or len(df) < 60:
+        return []
+    out: list[WatchItem] = []
+    close = df["close"]
+    px = float(close.iloc[-1])
+    a = atr(df, 14)
+    if pd.isna(a.iloc[-1]):
+        return []
+    atrv = float(a.iloc[-1])
+
+    # 1. EMA pullback forming — price is 1-3 ATRs from EMA55 in trending mkt
+    if len(close) >= 220:
+        e55, e100, e200 = ema(close, 55).iloc[-1], ema(close, 100).iloc[-1], ema(close, 200).iloc[-1]
+        if not any(pd.isna(v) for v in (e55, e100, e200)):
+            e55, e100, e200 = float(e55), float(e100), float(e200)
+            # bull pullback forming
+            if e55 > e100 > e200 and px > e55 and (px - e55) <= 3 * atrv and (px - e55) > 1 * atrv:
+                gap_atrs = (px - e55) / atrv
+                out.append(WatchItem(
+                    symbol=symbol, signal="EMA 55 pullback forming (long)",
+                    direction="long", level=e55, current_price=px,
+                    distance_pct=_distance_pct(e55, px),
+                    waiting_for=f"price to pull back to EMA55 ${e55:.2f} (currently {gap_atrs:.1f} ATR above)",
+                    citation="First 18.pdf p.67",
+                    bars_estimate=max(2, int(gap_atrs * 2)),
+                ))
+            # bear pullback forming
+            if e55 < e100 < e200 and px < e55 and (e55 - px) <= 3 * atrv and (e55 - px) > 1 * atrv:
+                gap_atrs = (e55 - px) / atrv
+                out.append(WatchItem(
+                    symbol=symbol, signal="EMA 55 pullback forming (short)",
+                    direction="short", level=e55, current_price=px,
+                    distance_pct=_distance_pct(e55, px),
+                    waiting_for=f"price to rally up to EMA55 ${e55:.2f} (currently {gap_atrs:.1f} ATR below)",
+                    citation="First 18.pdf p.67",
+                    bars_estimate=max(2, int(gap_atrs * 2)),
+                ))
+
+    # 2. 3rd-touch pending — find a level with EXACTLY 2 prior touches within tol
+    pivots = swing_pivots(df.tail(150), n=5)
+    tol = max(atrv * 0.5, px * 0.005)  # 0.5 ATR or 0.5% — whichever bigger
+    # Group pivot levels and count touches
+    levels_to_touches: dict[float, int] = {}
+    for p in pivots:
+        matched = False
+        for k in list(levels_to_touches.keys()):
+            if abs(p.price - k) <= tol:
+                levels_to_touches[k] = levels_to_touches[k] + 1
+                matched = True
+                break
+        if not matched:
+            levels_to_touches[p.price] = 1
+    for level, n_touches in levels_to_touches.items():
+        if n_touches == 2 and abs(px - level) <= 2 * atrv:
+            direction = "long" if px > level else "short"
+            out.append(WatchItem(
+                symbol=symbol, signal=f"3rd touch pending @ ${level:.2f}",
+                direction=direction, level=level, current_price=px,
+                distance_pct=_distance_pct(level, px),
+                waiting_for=f"price to retest ${level:.2f} ({n_touches} touches confirmed)",
+                citation="First 18.pdf p.66 — 3rd touch is highest probability",
+                bars_estimate=max(1, int(abs(px - level) / atrv * 2)),
+            ))
+
+    # 3. Range-tightening / Inside-Day approaching
+    if len(df) >= 5:
+        last5 = df.tail(5)
+        ranges = (last5["high"] - last5["low"]).values
+        if len(ranges) >= 3:
+            recent_avg = float(np.mean(ranges[-3:]))
+            prior_avg = float(np.mean(ranges[:-3])) if len(ranges) > 3 else recent_avg
+            if recent_avg < 0.6 * atrv and prior_avg > recent_avg:
+                hi5 = float(last5["high"].max())
+                lo5 = float(last5["low"].min())
+                out.append(WatchItem(
+                    symbol=symbol, signal="Range tightening — breakout watch",
+                    direction="long" if px > (hi5 + lo5) / 2 else "short",
+                    level=hi5 if px > (hi5 + lo5) / 2 else lo5,
+                    current_price=px,
+                    distance_pct=_distance_pct(hi5 if px > (hi5+lo5)/2 else lo5, px),
+                    waiting_for=f"break of 5-day range (${lo5:.2f}–${hi5:.2f})",
+                    citation="Second 18.pdf p.4 — Inside Day / range contraction",
+                    bars_estimate=3,
+                ))
+
+    # 4. S/R retest approaching (within 1 ATR but not yet touching)
+    sr = support_resistance(df.tail(200))
+    for level in sr["resistance"]:
+        gap = level - px
+        if 0 < gap <= 1.5 * atrv:
+            out.append(WatchItem(
+                symbol=symbol, signal=f"Resistance retest pending @ ${level:.2f}",
+                direction="short", level=level, current_price=px,
+                distance_pct=_distance_pct(level, px),
+                waiting_for=f"rejection at ${level:.2f} or break-and-flip",
+                citation="First 18.pdf p.61 — S/R role reversal",
+                bars_estimate=max(1, int(gap / atrv * 2)),
+            ))
+    for level in sr["support"]:
+        gap = px - level
+        if 0 < gap <= 1.5 * atrv:
+            out.append(WatchItem(
+                symbol=symbol, signal=f"Support retest pending @ ${level:.2f}",
+                direction="long", level=level, current_price=px,
+                distance_pct=_distance_pct(level, px),
+                waiting_for=f"hold at ${level:.2f} or break-down",
+                citation="First 18.pdf p.61 — S/R role reversal",
+                bars_estimate=max(1, int(gap / atrv * 2)),
+            ))
+
+    # De-dup close levels and limit to top 4 most urgent (smallest distance)
+    out.sort(key=lambda w: abs(w.distance_pct))
+    return out[:4]
+
+
+# ---------------------------------------------------------------------------
 # Context enrichment — 5 confluence checks
 #   • HTF (Higher Timeframe — weekly trend)             — CC: First 18 + Second 18 HTF-vs-LTF cheatsheet
 #   • Volume                                            — CC: Second 18 p.18 "Ranking by Volume"
@@ -994,13 +1138,73 @@ def resolve_ticker(query: str) -> str:
     return q
 
 
+_AI_OFFLINE_BLOCK = (
+    '<div class="ai-voice ai-offline">'
+    '<div class="ai-head">🎯 Senior Trader Read</div>'
+    "<i>(no commentary — either there's no Groq key on the server, or the key was revoked. "
+    "Set <code>OPENAI_API_KEY</code> in your Render dashboard → Environment to enable this.)</i>"
+    "</div>"
+)
+
+
+def _ai_voice_block(ai_text: str) -> str:
+    if not ai_text:
+        return _AI_OFFLINE_BLOCK
+    return (
+        '<div class="ai-voice">'
+        '<div class="ai-head">🎯 Senior Trader Read</div>'
+        f"{ai_text}"
+        "</div>"
+    )
+
+
+def _render_key_levels_panel(snap: "Snapshot") -> str:
+    """A consistent 'Key Levels' panel: price + EMAs + S/R + distance%.
+    Used on every setup card AND every snapshot card so the operator always
+    has the full picture next to a chart."""
+    if snap is None:
+        return ""
+    px = snap.current_price
+    def _row(label: str, value: Optional[float], color: str = "#e2e8f0") -> str:
+        if value is None:
+            return f'<div><span class="lbl">{label}</span><span class="val">—</span></div>'
+        dist_pct = ((value - px) / px * 100.0) if px else 0.0
+        arrow = "↑" if dist_pct > 0 else ("↓" if dist_pct < 0 else "•")
+        sign = "+" if dist_pct > 0 else ""
+        return (
+            f'<div><span class="lbl">{label}</span>'
+            f'<span class="val" style="color:{color}">${value:.2f} '
+            f'<span class="lvl-dist">({arrow} {sign}{dist_pct:.1f}%)</span></span></div>'
+        )
+    rows = []
+    rows.append(f'<div><span class="lbl">Current</span><span class="val" style="color:#fbbf24"><b>${px:.2f}</b></span></div>')
+    rows.append(_row("EMA 55",  snap.ema_55,  "#94a3b8"))
+    rows.append(_row("EMA 100", snap.ema_100, "#94a3b8"))
+    rows.append(_row("EMA 200", snap.ema_200, "#64748b"))
+    if snap.rsi_14 is not None:
+        rsi_color = "#ef4444" if snap.rsi_14 > 70 else ("#22c55e" if snap.rsi_14 < 30 else "#94a3b8")
+        rows.append(f'<div><span class="lbl">RSI 14</span><span class="val" style="color:{rsi_color}">{snap.rsi_14:.1f}</span></div>')
+    for sup in (snap.support_levels or [])[-3:]:
+        rows.append(_row("Support", sup, "#22c55e"))
+    for res in (snap.resistance_levels or [])[-3:]:
+        rows.append(_row("Resistance", res, "#ef4444"))
+    return (
+        '<div class="key-levels"><div class="kl-head">📐 Key Levels (with distance from current)</div>'
+        f'<div class="setup-grid">{"".join(rows)}</div></div>'
+    )
+
+
 def render_html(
     setups: list[Setup],
     scanned: int,
     duration_s: float,
     snapshots: Optional[list["Snapshot"]] = None,
+    levels_by_symbol: Optional[dict] = None,
+    watches: Optional[list] = None,
 ) -> str:
     snapshots = snapshots or []
+    levels_by_symbol = levels_by_symbol or {}
+    watches = watches or []
     # Sort: STRONG TAKE first, then TAKE, MARGINAL, AVOID. Within each, conviction × R:R desc.
     setups_sorted = sorted(
         setups,
@@ -1091,7 +1295,8 @@ def render_html(
               <div class="rationale">{ts.reasoning}</div>
               <div class="cite">📖 {ts.citation}</div>
               {_render_flags(ts.context_flags)}
-              {f'<div class="ai-voice"><div class="ai-head">🎯 Senior Trader Read</div>{ts.ai_analysis}</div>' if ts.ai_analysis else ''}
+              {_render_key_levels_panel(levels_by_symbol.get(ts.symbol))}
+              {(_ai_voice_block(ts.ai_analysis))}
             </div>
             """
         charts.append(f"""
@@ -1138,6 +1343,54 @@ def render_html(
         """)
     charts_html = "\n".join(charts)
 
+    # --- Watching section: setups that are FORMING but not yet firing.
+    # Group by symbol so each ticker appears once with all its watch items.
+    watches_by_sym: dict[str, list] = {}
+    for w in watches:
+        watches_by_sym.setdefault(w.symbol, []).append(w)
+    # Hide tickers that already have a fired setup — those are in the table above.
+    fired_syms = {s.symbol for s in setups_sorted}
+    watching_blocks: list[str] = []
+    for sym in sorted(watches_by_sym.keys()):
+        if sym in fired_syms:
+            continue
+        items = watches_by_sym[sym]
+        snap = levels_by_symbol.get(sym)
+        items_html = ""
+        for w in items[:4]:
+            dir_color = "#22c55e" if w.direction == "long" else "#ef4444"
+            arrow = "▲" if w.direction == "long" else "▼"
+            sign = "+" if w.distance_pct > 0 else ""
+            items_html += (
+                f'<div class="watch-row" style="border-left:3px solid {dir_color}">'
+                f'<div class="watch-head"><span style="color:{dir_color}">{arrow} {w.signal}</span>'
+                f'<span class="watch-dist">{sign}{w.distance_pct:.1f}% · ~{w.bars_estimate}d</span></div>'
+                f'<div class="watch-detail">Waiting for: {w.waiting_for}</div>'
+                f'<div class="cite">📖 {w.citation}</div>'
+                f'</div>'
+            )
+        kl = _render_key_levels_panel(snap) if snap else ""
+        px = snap.current_price if snap else 0.0
+        watching_blocks.append(
+            f'<div class="watching-card" data-symbol="{sym}">'
+            f'<div class="wc-head">'
+            f'<button class="star-btn" data-symbol="{sym}" onclick="toggleStar(event,\'{sym}\')">☆</button> '
+            f'<b>{sym}</b> <span class="watch-price">${px:.2f}</span>'
+            f'<button class="bell-btn" data-symbol="{sym}" data-price="{px:.2f}" '
+            f'onclick="setAlarm(event,\'{sym}\',{px:.2f})">🔔</button>'
+            f'</div>'
+            f'<div class="watch-list">{items_html}</div>'
+            f'{kl}'
+            f'</div>'
+        )
+    watching_html = ""
+    if watching_blocks:
+        watching_html = (
+            '<h2 style="margin-top:32px">👁 Watching — setups forming '
+            f'<span class="sub">({len(watching_blocks)} ticker(s) close to firing)</span></h2>'
+            '<div class="watching-grid">' + "".join(watching_blocks) + '</div>'
+        )
+
     # --- Snapshot cards for ad-hoc tickers with no setup
     snap_idx = len(charts)  # continue id numbering
     snap_blocks = []
@@ -1181,7 +1434,7 @@ def render_html(
             <div class="setups-side">
               <div class="setup-card">
                 <div class="setup-head" style="color:#94a3b8">📊 Live snapshot · CC context</div>
-                <div class="setup-grid">{''.join(lines)}</div>
+                {_render_key_levels_panel(snap)}
                 {_render_flags(snap.context_flags)}
                 <div class="rationale" style="margin-top:10px">
                   No Chart Champions setup is firing on this ticker right now. Use the chart + values above to monitor it. When a CC pattern develops (EMA pullback, CC region retracement, S/R flip, etc.) it will appear in the table on the next scan.
@@ -1273,6 +1526,36 @@ def render_html(
 
   /* Active alarm bar (banner when an alarm fires) */
   .alarm-toast {{ position:fixed; bottom:24px; right:24px; max-width:380px; background:linear-gradient(135deg,#16a34a,#22c55e); color:#000; padding:14px 18px; border-radius:10px; font-weight:600; box-shadow:0 10px 30px rgba(0,0,0,0.6); z-index:9999; }}
+
+  /* My-list bar — custom watchlist controls */
+  .mylist-bar {{ display:flex; flex-wrap:wrap; gap:8px; padding:10px 14px; background:#0f172a; border:1px solid #1e293b; border-radius:8px; align-items:center; font-size:12px; }}
+  .mylist-bar b {{ color:#fbbf24; }}
+  .mylist-bar .ml-btn {{ padding:6px 12px; border-radius:6px; border:1px solid #22c55e; background:transparent; color:#22c55e; cursor:pointer; font-size:11px; font-weight:600; }}
+  .mylist-bar .ml-btn:hover {{ background:#22c55e; color:#000; }}
+  .mylist-bar .ml-btn.danger {{ border-color:#ef4444; color:#ef4444; }}
+  .mylist-bar .ml-btn.danger:hover {{ background:#ef4444; color:#000; }}
+  .mylist-chips {{ display:flex; gap:4px; flex-wrap:wrap; }}
+  .mylist-chip {{ padding:2px 8px; border-radius:4px; background:#1e293b; color:#fbbf24; font-family:ui-monospace,monospace; font-size:11px; display:inline-flex; gap:6px; align-items:center; }}
+  .mylist-chip .x {{ cursor:pointer; color:#94a3b8; }}
+  .mylist-chip .x:hover {{ color:#ef4444; }}
+
+  /* Key Levels panel — appears below every setup card */
+  .key-levels {{ margin-top:10px; padding:10px; background:#0a0f1c; border:1px dashed #1e293b; border-radius:6px; }}
+  .kl-head {{ font-size:10px; text-transform:uppercase; letter-spacing:1px; color:#fbbf24; margin-bottom:8px; font-weight:600; }}
+  .lvl-dist {{ font-size:10px; color:#64748b; }}
+  .ai-offline {{ border-left-color:#94a3b8 !important; opacity:0.8; }}
+  .ai-offline code {{ background:#1e293b; padding:1px 4px; border-radius:3px; color:#fbbf24; font-size:11px; }}
+
+  /* Watching section — formed setups, not yet firing */
+  .watching-grid {{ display:grid; grid-template-columns:repeat(auto-fill, minmax(360px, 1fr)); gap:12px; margin:12px 0 24px 0; }}
+  .watching-card {{ background:#0f172a; border:1px solid #1e293b; border-left:4px solid #fbbf24; border-radius:8px; padding:12px; }}
+  .wc-head {{ display:flex; gap:6px; align-items:center; margin-bottom:10px; font-size:14px; }}
+  .wc-head b {{ font-size:15px; }}
+  .watch-price {{ font-family:ui-monospace,monospace; color:#fbbf24; margin-left:6px; }}
+  .watch-row {{ background:#0a0f1c; padding:8px 10px; border-radius:4px; margin-bottom:6px; font-size:11px; }}
+  .watch-head {{ display:flex; justify-content:space-between; font-weight:600; }}
+  .watch-dist {{ color:#fbbf24; font-family:ui-monospace,monospace; }}
+  .watch-detail {{ color:#94a3b8; margin-top:3px; }}
 </style></head>
 <body>
   <h1>📈 Live CC Setups</h1>
@@ -1291,9 +1574,19 @@ def render_html(
       <button type="submit">Scan</button>
       <a href="/" class="reset-link">↩ Default watchlist</a>
     </form>
+
+    <div class="mylist-bar">
+      <b>⭐ My Watchlist:</b>
+      <span id="mylist-chips" class="mylist-chips"></span>
+      <span id="mylist-empty" style="color:#64748b">empty — star any ticker (☆) to add, or click +Add</span>
+      <button class="ml-btn" onclick="addToMyList()">+ Add ticker</button>
+      <button class="ml-btn" id="scan-my-list" onclick="scanMyList()" style="display:none">🎯 Scan my list now</button>
+      <button class="ml-btn danger" id="clear-my-list" onclick="clearMyList()" style="display:none">Clear all</button>
+    </div>
+
     <div class="filter-bar">
       <button class="filter-btn active" data-filter="all">All</button>
-      <button class="filter-btn" data-filter="starred">⭐ Starred</button>
+      <button class="filter-btn" data-filter="starred">⭐ My list</button>
       <button class="filter-btn" data-filter="strong-take">🟢 STRONG TAKE</button>
       <button class="filter-btn" data-filter="take">🟢 TAKE</button>
       <button class="filter-btn" data-filter="long">▲ Long</button>
@@ -1321,6 +1614,8 @@ def render_html(
 
   {charts_html}
 
+  {watching_html}
+
   {snapshots_html}
 
   <div class="footer">
@@ -1346,6 +1641,60 @@ def render_html(
       saveStars(s);
       applyStarUI();
       applyFilter();
+      renderMyListBar();
+    }}
+
+    // --- Custom watchlist (= the user's stars) ----------------------------
+    function renderMyListBar() {{
+      const stars = getStars();
+      const chips = document.getElementById('mylist-chips');
+      const empty = document.getElementById('mylist-empty');
+      const scanBtn = document.getElementById('scan-my-list');
+      const clearBtn = document.getElementById('clear-my-list');
+      if (!chips) return;
+      if (stars.length === 0) {{
+        chips.innerHTML = '';
+        if (empty) empty.style.display = '';
+        if (scanBtn) scanBtn.style.display = 'none';
+        if (clearBtn) clearBtn.style.display = 'none';
+      }} else {{
+        chips.innerHTML = stars.map(s =>
+          `<span class="mylist-chip">${{s}} <span class="x" onclick="removeFromMyList('${{s}}')">✕</span></span>`
+        ).join('');
+        if (empty) empty.style.display = 'none';
+        if (scanBtn) scanBtn.style.display = '';
+        if (clearBtn) clearBtn.style.display = '';
+      }}
+    }}
+    function addToMyList() {{
+      const raw = prompt("Add ticker(s) to your watchlist:\\n(comma-separated, e.g.  AAPL, MSFT, BTC-USD, bitcoin, apple)");
+      if (!raw) return;
+      const stars = getStars();
+      raw.split(',').map(x => x.trim()).filter(Boolean).forEach(t => {{
+        const sym = t.toUpperCase();
+        if (sym && !stars.includes(sym)) stars.push(sym);
+      }});
+      saveStars(stars);
+      applyStarUI();
+      renderMyListBar();
+    }}
+    function removeFromMyList(sym) {{
+      saveStars(getStars().filter(s => s !== sym));
+      applyStarUI();
+      renderMyListBar();
+      applyFilter();
+    }}
+    function clearMyList() {{
+      if (!confirm('Remove ALL tickers from your watchlist?')) return;
+      saveStars([]);
+      applyStarUI();
+      renderMyListBar();
+      applyFilter();
+    }}
+    function scanMyList() {{
+      const stars = getStars();
+      if (!stars.length) return;
+      window.location.href = '/?symbols=' + encodeURIComponent(stars.join(','));
     }}
 
     function setAlarm(ev, sym, currentPrice) {{
@@ -1455,6 +1804,7 @@ def render_html(
       applyBellUI();
       applyFilter();
       checkAlarms();
+      renderMyListBar();
       if (Notification.permission === 'default') Notification.requestPermission();
     }});
   </script>
@@ -1526,15 +1876,49 @@ def run_full_scan(
     print(f"    Sector states: {sector_trends}")
 
     all_setups: list[Setup] = []
-    snapshots: list[Snapshot] = []
+    snapshots: list[Snapshot] = []     # ad-hoc "no setup" snapshots
+    levels_by_symbol: dict[str, Snapshot] = {}  # key-levels for EVERY ticker
+    all_watches: list[WatchItem] = []
+
+    def _build_snapshot(sym_u: str, daily_df: pd.DataFrame, weekly_df, etf_u: str) -> Snapshot:
+        close = daily_df["close"]
+        try:
+            e55  = float(ema(close, 55).iloc[-1])  if len(close) > 55 else None
+            e100 = float(ema(close, 100).iloc[-1]) if len(close) > 100 else None
+            e200 = float(ema(close, 200).iloc[-1]) if len(close) > 200 else None
+            rsi_v = float(rsi(close, 14).iloc[-1]) if len(close) > 14 else None
+            px = float(close.iloc[-1])
+        except Exception:
+            e55 = e100 = e200 = rsi_v = None
+            px = float(close.iloc[-1]) if len(close) else 0.0
+        try:
+            sr = support_resistance(daily_df.tail(200))
+        except Exception:
+            sr = {"support": [], "resistance": []}
+        return Snapshot(
+            symbol=sym_u,
+            current_price=px,
+            ema_55=e55, ema_100=e100, ema_200=e200, rsi_14=rsi_v,
+            support_levels=sr.get("support", [])[-3:],
+            resistance_levels=sr.get("resistance", [])[-3:],
+            context_flags=build_context(
+                daily_df=daily_df, symbol=sym_u,
+                setup_direction="long",
+                spy_trend=spy_trend,
+                sector_trend=sector_trends.get(etf_u, "side"),
+                weekly_df=weekly_df,
+            ),
+        )
+
     for i, sym in enumerate(tickers, 1):
         daily_df, setups, weekly_df = scan_one(sym)
         setups = [s for s in setups if s.risk_reward >= MIN_RISK_REWARD]
-        etf = SECTOR_ETF.get(sym.upper(), "SPY")
+        sym_u = sym.upper()
+        etf = SECTOR_ETF.get(sym_u, "SPY")
         for s in setups:
             s.context_flags = build_context(
                 daily_df=daily_df,
-                symbol=sym.upper(),
+                symbol=sym_u,
                 setup_direction=s.direction,
                 spy_trend=spy_trend,
                 sector_trend=sector_trends.get(etf, "side"),
@@ -1542,43 +1926,32 @@ def run_full_scan(
             )
         all_setups.extend(setups)
 
-        # If we're in always_show mode and no setup fired, build a snapshot
-        # so the user still sees a chart + current context.
-        if always_show and not setups and daily_df is not None and not daily_df.empty:
-            close = daily_df["close"]
+        # Always-on: build a key-levels Snapshot for every ticker.
+        # This powers the "Key Levels" panel on every setup card, plus the
+        # standalone snapshot card when no setup fired.
+        if daily_df is not None and not daily_df.empty:
+            snap_levels = _build_snapshot(sym_u, daily_df, weekly_df, etf)
+            levels_by_symbol[sym_u] = snap_levels
+            # Forming-setup detection runs on every ticker.
             try:
-                e55  = float(ema(close, 55).iloc[-1])  if len(close) > 55 else None
-                e100 = float(ema(close, 100).iloc[-1]) if len(close) > 100 else None
-                e200 = float(ema(close, 200).iloc[-1]) if len(close) > 200 else None
-                rsi_v = float(rsi(close, 14).iloc[-1]) if len(close) > 14 else None
-                px = float(close.iloc[-1])
+                watches = find_watches(sym_u, daily_df)
+                all_watches.extend(watches)
             except Exception:
-                e55 = e100 = e200 = rsi_v = None
-                px = float(close.iloc[-1]) if len(close) else 0.0
-            sr = {}
-            try:
-                from math import isnan
-                sr = support_resistance(daily_df.tail(200))
-            except Exception:
-                sr = {"support": [], "resistance": []}
-            snap = Snapshot(
-                symbol=sym.upper(),
-                current_price=px,
-                ema_55=e55, ema_100=e100, ema_200=e200, rsi_14=rsi_v,
-                support_levels=sr.get("support", [])[-3:],
-                resistance_levels=sr.get("resistance", [])[-3:],
-                context_flags=build_context(
-                    daily_df=daily_df, symbol=sym.upper(),
-                    setup_direction="long",  # placeholder
-                    spy_trend=spy_trend,
-                    sector_trend=sector_trends.get(etf, "side"),
-                    weekly_df=weekly_df,
-                ),
-            )
-            snapshots.append(snap)
+                pass
+            # If no setup fired AND we're in always_show, the snapshot is
+            # also the visible card.
+            if always_show and not setups:
+                snapshots.append(snap_levels)
 
-        marker = f"{len(setups)} setup(s)" if setups else ("snapshot" if always_show else "—")
-        print(f"  [{i:>2}/{len(tickers)}] {sym:<10} {marker}")
+        marker_bits = []
+        if setups:
+            marker_bits.append(f"{len(setups)} setup(s)")
+        if sym_u in levels_by_symbol:
+            n_watches = sum(1 for w in all_watches if w.symbol == sym_u)
+            if n_watches:
+                marker_bits.append(f"{n_watches} watch")
+        marker = " · ".join(marker_bits) if marker_bits else ("snapshot" if always_show else "—")
+        print(f"  [{i:>2}/{len(tickers)}] {sym_u:<10} {marker}")
 
     api_key, model = _load_groq_config()
     if all_setups and api_key:
@@ -1587,8 +1960,13 @@ def run_full_scan(
             s.ai_analysis = ai_enhance_setup(s, api_key, model)
 
     duration = time.time() - started
-    html = render_html(all_setups, len(tickers), duration, snapshots=snapshots)
-    print(f"✓ Scan complete: {len(all_setups)} setup(s), {len(snapshots)} snapshot(s) in {duration:.1f}s\n")
+    html = render_html(
+        all_setups, len(tickers), duration,
+        snapshots=snapshots,
+        levels_by_symbol=levels_by_symbol,
+        watches=all_watches,
+    )
+    print(f"✓ Scan complete: {len(all_setups)} setup(s), {len(snapshots)} snapshot(s), {len(all_watches)} watch(es) in {duration:.1f}s\n")
     return all_setups, duration, html
 
 
