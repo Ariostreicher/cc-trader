@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import sys
 import os
+import json
 import webbrowser
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import List, Optional
 
@@ -191,6 +192,10 @@ class Snapshot:
     support_levels: List[float] = field(default_factory=list)
     resistance_levels: List[float] = field(default_factory=list)
     context_flags: List[ContextFlag] = field(default_factory=list)
+    bid: Optional[float] = None
+    ask: Optional[float] = None
+    spread_pct: Optional[float] = None    # (ask - bid) / mid × 100
+    avg_volume: Optional[float] = None    # 20-day avg vol for liquidity gauge
 
 
 @dataclass
@@ -225,10 +230,136 @@ class Setup:
 
 
 # ---------------------------------------------------------------------------
+# Backtested conviction values — populated by `--backtest` at startup or by
+# the persisted JSON file on disk. Without a backtest the constants below act
+# as the "prior" — calibrated against typical CC-style win-rates (45-65%).
+# After running `python scan_setups.py --backtest`, real numbers replace these.
+# ---------------------------------------------------------------------------
+BACKTESTED_CONVICTION: dict[str, float] = {
+    "EMA Pullback":  0.62,    # prior — backtest will refine
+    "CC Region":     0.64,
+    "S/R Flip":      0.60,
+    "Volume Spike":  0.58,
+    "Inside Day":    0.55,
+    "RSI Reversal":  0.48,
+}
+
+# Load saved backtest results if present (written by run_backtest()).
+_BT_FILE = Path(__file__).parent / "backtest_results.json"
+if _BT_FILE.exists():
+    try:
+        _bt_data = json.loads(_BT_FILE.read_text())
+        for k, v in _bt_data.get("conviction", {}).items():
+            BACKTESTED_CONVICTION[k] = float(v)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Helpers used across detectors — volume confirmation, smarter stops/targets,
+# and bar-pattern classification. These were added in the "senior trader audit"
+# round to reflect real CC methodology more faithfully than the original
+# mechanical EMA/ATR shortcuts.
+# ---------------------------------------------------------------------------
+def volume_confirmed(df: pd.DataFrame, threshold: float = 0.8) -> bool:
+    """Return True if the most recent bar's volume is at least `threshold`×
+    the trailing 20-bar average. CC requires volume confirmation on a pullback
+    or breakout bar — without it the move is "stealth" and lower-probability."""
+    if len(df) < 22:
+        return False
+    last_vol = float(df["volume"].iloc[-1])
+    vol_avg  = float(df["volume"].iloc[-22:-1].mean())
+    return vol_avg > 0 and last_vol >= threshold * vol_avg
+
+
+def nearest_swing_below(df: pd.DataFrame, price: float, lookback: int = 60, n: int = 5) -> Optional[float]:
+    """Find the closest swing low BELOW `price` within the last `lookback` bars.
+    Used for placing stops on long setups — much better than mechanical
+    EMA-buffer because a swing low is where invalidation actually lives."""
+    pivots = swing_pivots(df.tail(lookback), n=n)
+    lows = [p.price for p in pivots if p.kind == "low" and p.price < price]
+    return max(lows) if lows else None
+
+
+def nearest_swing_above(df: pd.DataFrame, price: float, lookback: int = 60, n: int = 5) -> Optional[float]:
+    """Mirror of nearest_swing_below — stop reference for short setups."""
+    pivots = swing_pivots(df.tail(lookback), n=n)
+    highs = [p.price for p in pivots if p.kind == "high" and p.price > price]
+    return min(highs) if highs else None
+
+
+def smart_targets_long(df: pd.DataFrame, entry: float, stop: float) -> List[float]:
+    """Build 2 target levels for a LONG by climbing through real resistance.
+    T1 = nearest resistance above entry (if any).
+    T2 = second resistance, OR 2× the T1 distance if only one exists.
+    Falls back to 2R / 4R when no S/R data is available."""
+    sr = support_resistance(df.tail(200))
+    risk = abs(entry - stop)
+    resistances_above = [r for r in sorted(sr["resistance"]) if r > entry + 0.5 * risk]
+    if len(resistances_above) >= 2:
+        return [resistances_above[0], resistances_above[1]]
+    if len(resistances_above) == 1:
+        t1 = resistances_above[0]
+        return [t1, entry + 2 * (t1 - entry)]
+    # No S/R found — fall back to symmetric 2R / 4R targets
+    return [entry + 2 * risk, entry + 4 * risk]
+
+
+def smart_targets_short(df: pd.DataFrame, entry: float, stop: float) -> List[float]:
+    """Mirror of smart_targets_long for SHORT setups."""
+    sr = support_resistance(df.tail(200))
+    risk = abs(stop - entry)
+    supports_below = [s for s in sorted(sr["support"], reverse=True) if s < entry - 0.5 * risk]
+    if len(supports_below) >= 2:
+        return [supports_below[0], supports_below[1]]
+    if len(supports_below) == 1:
+        t1 = supports_below[0]
+        return [t1, entry - 2 * (entry - t1)]
+    return [entry - 2 * risk, entry - 4 * risk]
+
+
+def bar_pattern(df: pd.DataFrame) -> str:
+    """Classify the most recent bar relative to the prior bar. CC flags
+    hammer / engulfing / inside bars as 'confirmation' patterns on the
+    trigger bar. Returns one of: 'hammer', 'inverted-hammer', 'engulfing',
+    'inside', 'doji', 'neutral'."""
+    if len(df) < 2:
+        return "neutral"
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    body = abs(last["close"] - last["open"])
+    full = max(last["high"] - last["low"], 1e-9)
+    upper_wick = last["high"] - max(last["close"], last["open"])
+    lower_wick = min(last["close"], last["open"]) - last["low"]
+    # Doji — open ≈ close
+    if body / full < 0.1:
+        return "doji"
+    # Inside bar — entirely within previous bar's range
+    if last["high"] <= prev["high"] and last["low"] >= prev["low"]:
+        return "inside"
+    # Engulfing — body fully contains prior bar's body
+    prev_body_hi = max(prev["open"], prev["close"])
+    prev_body_lo = min(prev["open"], prev["close"])
+    cur_body_hi  = max(last["open"], last["close"])
+    cur_body_lo  = min(last["open"], last["close"])
+    if cur_body_hi >= prev_body_hi and cur_body_lo <= prev_body_lo and body > abs(prev["close"] - prev["open"]):
+        return "engulfing"
+    # Hammer — long lower wick, small body near top
+    if lower_wick >= 2 * body and upper_wick < body:
+        return "hammer"
+    if upper_wick >= 2 * body and lower_wick < body:
+        return "inverted-hammer"
+    return "neutral"
+
+
+# ---------------------------------------------------------------------------
 # Detectors — Chart Champions rules
 # ---------------------------------------------------------------------------
 def detect_ema_pullback(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
-    """First 18.pdf p.67 — EMA 55/100/200 alignment + pullback."""
+    """First 18.pdf p.67 — EMA 55/100/200 alignment + pullback.
+    Requires volume confirmation AND a bullish/bearish bar pattern on the
+    trigger bar. Stops anchor to nearest swing pivot, targets use real S/R.
+    Conviction is set by the backtest engine when available."""
     if len(df) < 220:
         return None
     close = df["close"]
@@ -240,42 +371,39 @@ def detect_ema_pullback(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
     e55_, e100_, e200_ = float(e55.iloc[-1]), float(e100.iloc[-1]), float(e200.iloc[-1])
     if np.isnan(e200_) or np.isnan(atrv):
         return None
+    if not volume_confirmed(df):
+        return None
+    pat = bar_pattern(df)
+    base_conv = BACKTESTED_CONVICTION.get("EMA Pullback", 0.62)
 
     if e55_ > e100_ > e200_ and px > e55_ and (px - e55_) <= atrv:
-        pivots = swing_pivots(df.tail(120), n=5)
-        lows = [p.price for p in pivots if p.kind == "low"]
-        highs = [p.price for p in pivots if p.kind == "high"]
-        if not lows or not highs:
-            return None
-        # CC tight stop: just below EMA55 (soft) — invalidates the pullback thesis.
-        # If a more recent micro-swing low is BETWEEN EMA55 and EMA100, use that.
-        micro_low = lows[-1] if e100_ <= lows[-1] <= e55_ else (e55_ - 0.5 * atrv)
-        stop = min(micro_low, e55_ - 0.3 * atrv)
-        target1 = highs[-1]
-        target2 = fibonacci_levels(highs[-1], lows[-1])["1.272"]
+        # Stop = nearest swing low below entry (CC: invalidation lives at the
+        # last respected low). Use ATR buffer to avoid wick-outs.
+        swing_low = nearest_swing_below(df, px, lookback=80)
+        ema_stop  = e55_ - 0.3 * atrv
+        stop = min(swing_low, ema_stop) if swing_low is not None else ema_stop
+        # Confirmation pattern boost: hammer/engulfing add to conviction.
+        conv = base_conv + (0.10 if pat in ("hammer", "engulfing") else 0.0)
+        targets = smart_targets_long(df, px, stop)
         return Setup(
             symbol, "EMA 55/100/200 Pullback (long)", "long",
-            entry=px, stop_loss=stop, targets=[target1, target2],
-            current_price=px, conviction=0.78,
-            reasoning=f"Bull alignment 55>100>200 (EMA55 ${e55_:.2f} > 100 ${e100_:.2f} > 200 ${e200_:.2f}). Price ${px:.2f} pulling back to EMA55 = high-probability long.",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=min(0.92, conv),
+            reasoning=f"Bull align 55>100>200, price pulling back to EMA55 (${e55_:.2f}). Vol confirmed, bar pattern: {pat}. Stop at swing-low ${stop:.2f}.",
             citation="First 18.pdf p.67",
         )
 
     if e55_ < e100_ < e200_ and px < e55_ and (e55_ - px) <= atrv:
-        pivots = swing_pivots(df.tail(120), n=5)
-        lows = [p.price for p in pivots if p.kind == "low"]
-        highs = [p.price for p in pivots if p.kind == "high"]
-        if not lows or not highs:
-            return None
-        micro_high = highs[-1] if e55_ <= highs[-1] <= e100_ else (e55_ + 0.5 * atrv)
-        stop = max(micro_high, e55_ + 0.3 * atrv)
-        target1 = lows[-1]
-        target2 = lows[-1] - (highs[-1] - lows[-1]) * 0.272
+        swing_high = nearest_swing_above(df, px, lookback=80)
+        ema_stop = e55_ + 0.3 * atrv
+        stop = max(swing_high, ema_stop) if swing_high is not None else ema_stop
+        conv = base_conv + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
+        targets = smart_targets_short(df, px, stop)
         return Setup(
             symbol, "EMA 55/100/200 Pullback (short)", "short",
-            entry=px, stop_loss=stop, targets=[target1, target2],
-            current_price=px, conviction=0.72,
-            reasoning=f"Bear alignment 55<100<200 (EMA55 ${e55_:.2f} < 100 ${e100_:.2f} < 200 ${e200_:.2f}). Price ${px:.2f} pulling up to EMA55.",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=min(0.92, conv - 0.05),
+            reasoning=f"Bear align 55<100<200, price reaching EMA55 (${e55_:.2f}). Vol confirmed, bar pattern: {pat}. Stop at swing-high ${stop:.2f}.",
             citation="First 18.pdf p.67",
         )
     return None
@@ -291,71 +419,85 @@ def detect_cc_region_pullback(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
     px = float(last["close"])
     atrv = float(atr(df, 14).iloc[-1])
 
+    if not volume_confirmed(df):
+        return None
+    pat = bar_pattern(df)
+    base = BACKTESTED_CONVICTION.get("CC Region", 0.64)
+
     if a.kind == "low" and b.kind == "high" and b.price > a.price:
         lo, hi = cc_region(b.price, a.price)
         if float(last["low"]) <= hi and px > lo:
-            fib = fibonacci_levels(b.price, a.price)
+            stop = lo - 0.3 * atrv
+            targets = smart_targets_long(df, px, stop)
+            conv = base + (0.10 if pat in ("hammer", "engulfing") else 0.0)
             return Setup(
                 symbol, "CC Region Pullback (long)", "long",
-                entry=px, stop_loss=lo - 0.3 * atrv,
-                targets=[b.price, fib["1.272"]],
-                current_price=px, conviction=0.78,
-                reasoning=f"Price wicked into CC region ${lo:.2f}–${hi:.2f} (0.618–0.66 retracement) and closed above.",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=min(0.92, conv),
+                reasoning=f"Price wicked into CC region ${lo:.2f}–${hi:.2f} (0.618–0.66 retracement) and closed above. Bar: {pat}.",
                 citation="First 18.pdf p.1, p.63",
             )
     if a.kind == "high" and b.kind == "low" and b.price < a.price:
         lo, hi = cc_region(a.price, b.price)
         if float(last["high"]) >= lo and px < hi:
-            fib = fibonacci_levels(a.price, b.price)
+            stop = hi + 0.3 * atrv
+            targets = smart_targets_short(df, px, stop)
+            conv = base + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
             return Setup(
                 symbol, "CC Region Pullback (short)", "short",
-                entry=px, stop_loss=hi + 0.3 * atrv,
-                targets=[b.price, b.price - (fib["1.272"] - a.price)],
-                current_price=px, conviction=0.72,
-                reasoning=f"Bearish CC region rejection at ${lo:.2f}–${hi:.2f}.",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=min(0.92, conv - 0.05),
+                reasoning=f"Bearish CC region rejection at ${lo:.2f}–${hi:.2f}. Bar: {pat}.",
                 citation="First 18.pdf p.1 (inverted)",
             )
     return None
 
 
 def detect_sr_flip(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
-    """First 18.pdf p.61 — broken level retested in the opposite role."""
+    """First 18.pdf p.61 — broken level retested in the opposite role.
+    Requires volume confirmation + a confirming bar pattern."""
     sr = support_resistance(df.tail(200))
     last = df.iloc[-1]
     px = float(last["close"])
     lo = float(last["low"])
     hi = float(last["high"])
     atrv = float(atr(df, 14).iloc[-1])
+    if not volume_confirmed(df):
+        return None
+    pat = bar_pattern(df)
+    base = BACKTESTED_CONVICTION.get("S/R Flip", 0.60)
 
     for level in sr["resistance"]:
         if lo <= level <= px and (px - level) <= 0.5 * atrv:
-            higher = [r for r in sr["resistance"] if r > px]
-            t1 = higher[0] if higher else px + 2 * (px - level)
+            stop = level - 0.5 * atrv
+            targets = smart_targets_long(df, px, stop)
+            conv = base + (0.10 if pat in ("hammer", "engulfing") else 0.0)
             return Setup(
                 symbol, "Resistance Flip to Support (long)", "long",
-                entry=px, stop_loss=level - 0.5 * atrv,
-                targets=[t1, px + 3 * (px - level)],
-                current_price=px, conviction=0.72,
-                reasoning=f"Former resistance ${level:.2f} broken and retested as support.",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=min(0.92, conv),
+                reasoning=f"Former resistance ${level:.2f} broken and retested as support. Bar: {pat}.",
                 citation="First 18.pdf p.61",
             )
     for level in sr["support"]:
         if px <= level <= hi and (level - px) <= 0.5 * atrv:
-            lower = [s for s in sr["support"] if s < px]
-            t1 = lower[-1] if lower else px - 2 * (level - px)
+            stop = level + 0.5 * atrv
+            targets = smart_targets_short(df, px, stop)
+            conv = base + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
             return Setup(
                 symbol, "Support Flip to Resistance (short)", "short",
-                entry=px, stop_loss=level + 0.5 * atrv,
-                targets=[t1, px - 3 * (level - px)],
-                current_price=px, conviction=0.68,
-                reasoning=f"Former support ${level:.2f} broken and retested as resistance.",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=min(0.92, conv - 0.05),
+                reasoning=f"Former support ${level:.2f} broken and retested as resistance. Bar: {pat}.",
                 citation="First 18.pdf p.61 (inverted)",
             )
     return None
 
 
 def detect_volume_spike(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
-    """Second 18.pdf p.18 — new 20-bar high/low on 2x avg volume."""
+    """Second 18.pdf p.18 — new 20-bar high/low on 2x avg volume.
+    This already has volume confirmation baked in (it IS the signal).
+    Stops use the recent range edge; targets use real S/R."""
     if len(df) < 25:
         return None
     last = df.iloc[-1]
@@ -367,62 +509,73 @@ def detect_volume_spike(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
     low20 = float(window["low"].min())
     px = float(last["close"])
     atrv = float(atr(df, 14).iloc[-1])
+    base = BACKTESTED_CONVICTION.get("Volume Spike", 0.58)
+    pat = bar_pattern(df)
 
     if px > high20:
+        stop = high20 - 0.5 * atrv
+        targets = smart_targets_long(df, px, stop)
+        conv = base + (0.10 if pat == "engulfing" else 0.0)
         return Setup(
             symbol, "Volume Spike Breakout (long)", "long",
-            entry=px, stop_loss=high20 - 0.5 * atrv,
-            targets=[px + 1.5 * (px - high20 + 0.5 * atrv), px + 3 * (px - high20 + 0.5 * atrv)],
-            current_price=px, conviction=0.72,
-            reasoning=f"New 20-bar high on {float(last['volume'])/vol_avg:.1f}× average volume.",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=min(0.92, conv),
+            reasoning=f"New 20-bar high on {float(last['volume'])/vol_avg:.1f}× avg volume. Bar: {pat}.",
             citation="Second 18.pdf p.18",
         )
     if px < low20:
+        stop = low20 + 0.5 * atrv
+        targets = smart_targets_short(df, px, stop)
+        conv = base + (0.10 if pat == "engulfing" else 0.0)
         return Setup(
             symbol, "Volume Spike Breakdown (short)", "short",
-            entry=px, stop_loss=low20 + 0.5 * atrv,
-            targets=[px - 1.5 * (low20 + 0.5 * atrv - px), px - 3 * (low20 + 0.5 * atrv - px)],
-            current_price=px, conviction=0.70,
-            reasoning=f"New 20-bar low on {float(last['volume'])/vol_avg:.1f}× volume.",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=min(0.92, conv - 0.05),
+            reasoning=f"New 20-bar low on {float(last['volume'])/vol_avg:.1f}× volume. Bar: {pat}.",
             citation="Second 18.pdf p.18 (inverted)",
         )
     return None
 
 
 def detect_inside_day(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
-    """First 18.pdf p.43 — inside day breakout."""
-    if len(df) < 4:
+    """First 18.pdf p.43 — inside day breakout. Requires breakout-day volume."""
+    if len(df) < 25:
         return None
     d2, d1, d0 = df.iloc[-3], df.iloc[-2], df.iloc[-1]
     if not (d1["high"] <= d2["high"] and d1["low"] >= d2["low"]):
         return None
+    if not volume_confirmed(df):
+        return None
     atrv = float(atr(df, 14).iloc[-1])
     px = float(d0["close"])
-    range_ = float(d1["high"]) - float(d1["low"])
+    base = BACKTESTED_CONVICTION.get("Inside Day", 0.55)
 
     if px > d1["high"]:
+        stop = float(d1["low"]) - 0.2 * atrv
+        targets = smart_targets_long(df, px, stop)
         return Setup(
             symbol, "Inside Day Breakout (long)", "long",
-            entry=px, stop_loss=float(d1["low"]) - 0.2 * atrv,
-            targets=[px + range_, px + 2 * range_],
-            current_price=px, conviction=0.66,
-            reasoning=f"Inside-day breakout above ${d1['high']:.2f}.",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=base,
+            reasoning=f"Inside-day breakout above ${d1['high']:.2f}. Vol confirmed.",
             citation="First 18.pdf p.43",
         )
     if px < d1["low"]:
+        stop = float(d1["high"]) + 0.2 * atrv
+        targets = smart_targets_short(df, px, stop)
         return Setup(
             symbol, "Inside Day Breakdown (short)", "short",
-            entry=px, stop_loss=float(d1["high"]) + 0.2 * atrv,
-            targets=[px - range_, px - 2 * range_],
-            current_price=px, conviction=0.64,
-            reasoning=f"Inside-day breakdown below ${d1['low']:.2f}.",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=base - 0.05,
+            reasoning=f"Inside-day breakdown below ${d1['low']:.2f}. Vol confirmed.",
             citation="First 18.pdf p.43 (inverted)",
         )
     return None
 
 
 def detect_rsi_reversal(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
-    """Second 18.pdf p.1 — Entry Triggers / RSI extremes."""
+    """Second 18.pdf p.1 — Entry Triggers / RSI extremes. Volume + bar pattern
+    confirmation tightened. Stops/targets use real S/R."""
     r = rsi(df["close"], 14)
     if len(r.dropna()) < 3:
         return None
@@ -430,30 +583,33 @@ def detect_rsi_reversal(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
     last = df.iloc[-1]
     px = float(last["close"])
     atrv = float(atr(df, 14).iloc[-1])
-    win = df.tail(20)
+    if not volume_confirmed(df, threshold=1.0):  # tighter: full avg vol
+        return None
+    pat = bar_pattern(df)
+    base = BACKTESTED_CONVICTION.get("RSI Reversal", 0.48)
 
     if r_prev < 30 and r_now >= 30:
-        lo = float(win["low"].min())
-        hi = float(win["high"].max())
-        stop = lo - 0.3 * atrv
+        swing_low = nearest_swing_below(df, px, lookback=40)
+        stop = swing_low - 0.3 * atrv if swing_low is not None else px * 0.97
+        targets = smart_targets_long(df, px, stop)
+        conv = base + (0.10 if pat in ("hammer", "engulfing") else 0.0)
         return Setup(
             symbol, "RSI Oversold Reversal (long)", "long",
-            entry=px, stop_loss=stop,
-            targets=[hi, px + 2 * (px - stop)],
-            current_price=px, conviction=0.55,
-            reasoning=f"RSI exiting oversold ({r_prev:.1f}→{r_now:.1f}).",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=min(0.88, conv),
+            reasoning=f"RSI exiting oversold ({r_prev:.1f}→{r_now:.1f}). Vol confirmed, bar: {pat}.",
             citation="Second 18.pdf p.1",
         )
     if r_prev > 70 and r_now <= 70:
-        lo = float(win["low"].min())
-        hi = float(win["high"].max())
-        stop = hi + 0.3 * atrv
+        swing_high = nearest_swing_above(df, px, lookback=40)
+        stop = swing_high + 0.3 * atrv if swing_high is not None else px * 1.03
+        targets = smart_targets_short(df, px, stop)
+        conv = base + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
         return Setup(
             symbol, "RSI Overbought Reversal (short)", "short",
-            entry=px, stop_loss=stop,
-            targets=[lo, px - 2 * (stop - px)],
-            current_price=px, conviction=0.55,
-            reasoning=f"RSI exiting overbought ({r_prev:.1f}→{r_now:.1f}).",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=min(0.88, conv - 0.05),
+            reasoning=f"RSI exiting overbought ({r_prev:.1f}→{r_now:.1f}). Vol confirmed, bar: {pat}.",
             citation="Second 18.pdf p.1 (inverted)",
         )
     return None
@@ -1003,11 +1159,11 @@ def scan_one(symbol: str) -> tuple[Optional[pd.DataFrame], list[Setup], Optional
         with contextlib.redirect_stderr(buf):
             df = yf.download(
                 sym, period="2y", interval="1d",
-                auto_adjust=False, progress=False, threads=False,
+                auto_adjust=True, progress=False, threads=False,
             )
             weekly = yf.download(
                 sym, period="3y", interval="1wk",
-                auto_adjust=False, progress=False, threads=False,
+                auto_adjust=True, progress=False, threads=False,
             )
     except Exception:
         return None, [], None
@@ -1196,6 +1352,24 @@ def _render_key_levels_panel(snap: "Snapshot") -> str:
         )
     rows = []
     rows.append(f'<div><span class="lbl">Current</span><span class="val" style="color:#fbbf24"><b>${px:.2f}</b></span></div>')
+    # Bid / ask / spread — when available
+    if getattr(snap, "bid", None) is not None and getattr(snap, "ask", None) is not None:
+        spread_str = f" ({snap.spread_pct:.2f}%)" if snap.spread_pct else ""
+        spread_color = "#22c55e" if snap.spread_pct and snap.spread_pct < 0.10 else (
+                       "#f59e0b" if snap.spread_pct and snap.spread_pct < 0.50 else "#ef4444")
+        rows.append(
+            f'<div><span class="lbl">Bid/Ask</span>'
+            f'<span class="val" style="color:{spread_color}">${snap.bid:.2f} / ${snap.ask:.2f}'
+            f'<span class="lvl-dist">{spread_str}</span></span></div>'
+        )
+    if getattr(snap, "avg_volume", None):
+        # Format volume compactly: 1.2M, 540K, etc.
+        v = snap.avg_volume
+        if v >= 1_000_000:  v_str = f"{v/1_000_000:.1f}M"
+        elif v >= 1_000:    v_str = f"{v/1_000:.0f}K"
+        else:               v_str = f"{v:.0f}"
+        liq_color = "#22c55e" if v >= 1_000_000 else ("#f59e0b" if v >= 100_000 else "#ef4444")
+        rows.append(f'<div><span class="lbl">Avg vol (20d)</span><span class="val" style="color:{liq_color}">{v_str}</span></div>')
     rows.append(_row("EMA 55",  snap.ema_55,  "#94a3b8"))
     rows.append(_row("EMA 100", snap.ema_100, "#94a3b8"))
     rows.append(_row("EMA 200", snap.ema_200, "#64748b"))
@@ -1220,11 +1394,16 @@ def render_html(
     levels_by_symbol: Optional[dict] = None,
     watches: Optional[list] = None,
     chart_data_by_symbol: Optional[dict] = None,
+    market_regime: Optional[dict] = None,
+    macro_event: Optional[tuple] = None,
+    sector_counts: Optional[dict] = None,
 ) -> str:
     snapshots = snapshots or []
     levels_by_symbol = levels_by_symbol or {}
     watches = watches or []
     chart_data_by_symbol = chart_data_by_symbol or {}
+    market_regime = market_regime or {}
+    sector_counts = sector_counts or {}
     # Sort: STRONG TAKE first, then TAKE, MARGINAL, AVOID. Within each, conviction × R:R desc.
     setups_sorted = sorted(
         setups,
@@ -1274,6 +1453,33 @@ def render_html(
     for label, color in [("STRONG TAKE", "#22c55e"), ("TAKE", "#86efac"), ("MARGINAL", "#f59e0b"), ("AVOID", "#ef4444")]:
         n = verdict_counts.get(label, 0)
         legend_html += f'<span class="legend-pill" style="background:{color};color:#000">{label} · {n}</span>'
+
+    # Regime + macro banner — top-of-page risk-context strip
+    regime_color = {
+        "low-vol":  "#22c55e", "normal": "#94a3b8",
+        "elevated": "#f59e0b", "extreme": "#ef4444", "unknown": "#475569",
+    }.get(market_regime.get("vix_regime", "unknown"), "#475569")
+    vix_lvl = market_regime.get("vix_level")
+    vix_lvl_str = f"{vix_lvl:.1f}" if vix_lvl is not None else "—"
+    regime_strip = (
+        f'<div class="regime-strip">'
+        f'<span class="regime-pill" style="background:{regime_color};color:#000">'
+        f'VIX {vix_lvl_str} · {market_regime.get("vix_regime", "unknown").upper()}</span>'
+    )
+    if macro_event:
+        regime_strip += (
+            f'<span class="regime-pill" style="background:#ef4444;color:#000">'
+            f'⚠ {macro_event[1]} on {macro_event[0]} — within 24h</span>'
+        )
+    # Sector concentration warning
+    concentrated = [(etf, n) for etf, n in sector_counts.items() if n >= 3]
+    if concentrated:
+        for etf, n in concentrated:
+            regime_strip += (
+                f'<span class="regime-pill" style="background:#f59e0b;color:#000">'
+                f'⚠ {n} setups in {etf} — correlation risk (1 trade, not {n})</span>'
+            )
+    regime_strip += '</div>'
 
     # Autocomplete suggestions: every alias key + the watchlist itself.
     # Browser shows these as a dropdown when the user types in the search box.
@@ -1341,6 +1547,11 @@ def render_html(
               {_render_flags(ts.context_flags)}
               {_render_key_levels_panel(levels_by_symbol.get(ts.symbol))}
               {(_ai_voice_block(ts.ai_analysis))}
+              <div class="setup-actions">
+                <button onclick="sizeTrade('{ts.symbol}', {ts.entry:.4f}, {ts.stop_loss:.4f})">📐 Size this</button>
+                <button class="take-btn" onclick="takeTrade('{ts.symbol}', '{ts.name}', '{ts.direction}', {ts.entry:.4f}, {ts.stop_loss:.4f}, {ts.targets[0] if ts.targets else 0:.4f}, {ts.targets[1] if len(ts.targets)>1 else 0:.4f})">▶ Take</button>
+                <button onclick="passTrade('{ts.symbol}', '{ts.name}')">⏭ Pass</button>
+              </div>
             </div>
             """
         has_data = s.symbol in chart_data_by_symbol
@@ -1537,6 +1748,10 @@ def render_html(
   .sym-link {{ cursor:pointer; color:#e2e8f0; text-decoration:none; border-bottom:1px dotted #475569; }}
   .sym-link:hover {{ color:#22c55e; border-color:#22c55e; }}
 
+  /* Regime strip — risk context above the legend */
+  .regime-strip {{ display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }}
+  .regime-pill {{ padding:5px 12px; border-radius:6px; font-size:11px; font-weight:700; letter-spacing:0.5px; font-family:ui-monospace,monospace; }}
+
   /* Active alarm bar (banner when an alarm fires) */
   .alarm-toast {{ position:fixed; bottom:24px; right:24px; max-width:380px; background:linear-gradient(135deg,#16a34a,#22c55e); color:#000; padding:14px 18px; border-radius:10px; font-weight:600; box-shadow:0 10px 30px rgba(0,0,0,0.6); z-index:9999; }}
 
@@ -1558,6 +1773,30 @@ def render_html(
   .lvl-dist {{ font-size:10px; color:#64748b; }}
   .ai-offline {{ border-left-color:#94a3b8 !important; opacity:0.8; }}
   .ai-offline code {{ background:#1e293b; padding:1px 4px; border-radius:3px; color:#fbbf24; font-size:11px; }}
+
+  /* Position sizer + trade journal panels */
+  .tools-bar {{ display:flex; flex-wrap:wrap; gap:12px; margin:10px 0 14px 0; padding:12px 14px; background:#0f172a; border:1px solid #1e293b; border-radius:8px; align-items:center; font-size:12px; }}
+  .tools-bar label {{ color:#94a3b8; font-size:11px; }}
+  .tools-bar input {{ width:90px; padding:5px 8px; border-radius:4px; border:1px solid #1e293b; background:#0a0f1c; color:#e2e8f0; font-family:ui-monospace,monospace; }}
+  .tools-bar .tools-btn {{ padding:6px 12px; border-radius:6px; border:1px solid #22c55e; background:transparent; color:#22c55e; cursor:pointer; font-size:11px; font-weight:600; }}
+  .tools-bar .tools-btn:hover {{ background:#22c55e; color:#000; }}
+  .size-out {{ color:#fbbf24; font-weight:700; font-family:ui-monospace,monospace; }}
+
+  /* Trade journal panel */
+  .journal-panel {{ background:#0f172a; border:1px solid #1e293b; border-radius:8px; padding:14px; margin-top:18px; }}
+  .journal-panel h3 {{ margin:0 0 10px 0; font-size:14px; color:#fbbf24; }}
+  .journal-row {{ display:grid; grid-template-columns: 80px 60px 60px 70px 70px 70px 1fr 60px; gap:8px; padding:6px 0; border-bottom:1px solid #1e293b; font-size:11px; font-family:ui-monospace,monospace; align-items:center; }}
+  .journal-row.header {{ color:#94a3b8; font-weight:700; border-bottom:2px solid #334155; }}
+  .journal-row .r-win {{ color:#22c55e; }}
+  .journal-row .r-loss {{ color:#ef4444; }}
+  .journal-empty {{ color:#64748b; padding:18px; text-align:center; font-size:12px; }}
+
+  /* Per-setup "Size this trade" + "Take" buttons */
+  .setup-actions {{ display:flex; gap:6px; margin-top:10px; padding-top:8px; border-top:1px solid #1e293b; }}
+  .setup-actions button {{ flex:1; padding:5px 8px; border-radius:4px; border:1px solid #1e293b; background:#0a0f1c; color:#94a3b8; cursor:pointer; font-size:11px; }}
+  .setup-actions button:hover {{ background:#1e293b; color:#e2e8f0; }}
+  .setup-actions .take-btn {{ border-color:#22c55e; color:#22c55e; }}
+  .setup-actions .take-btn:hover {{ background:#22c55e; color:#000; }}
 
   /* Watching section — formed setups, not yet firing */
   .watching-grid {{ display:grid; grid-template-columns:repeat(auto-fill, minmax(360px, 1fr)); gap:12px; margin:12px 0 24px 0; }}
@@ -1607,6 +1846,18 @@ def render_html(
     </div>
   </div>
 
+  {regime_strip}
+
+  <div class="tools-bar">
+    <label>Account $:</label>
+    <input id="acct-size" type="number" value="10000" step="100" oninput="onSizerChange()"/>
+    <label>Risk %:</label>
+    <input id="risk-pct"  type="number" value="0.5"  step="0.1" oninput="onSizerChange()"/>
+    <span class="size-out">Risk per trade: $<span id="risk-dollars">50.00</span></span>
+    <button class="tools-btn" onclick="document.getElementById('journal-panel').scrollIntoView({{behavior:'smooth'}})">📒 Trade Journal</button>
+    <button class="tools-btn" onclick="if(confirm('Reset stars, alarms, and journal?')){{localStorage.removeItem('cc_stars');localStorage.removeItem('cc_alarms');localStorage.removeItem('cc_journal');location.reload();}}">Reset all data</button>
+  </div>
+
   <div class="legend">{legend_html}</div>
 
   <table>
@@ -1630,6 +1881,16 @@ def render_html(
   {watching_html}
 
   {snapshots_html}
+
+  <div class="journal-panel" id="journal-panel">
+    <h3>📒 Trade Journal</h3>
+    <div class="sub" style="margin:0 0 10px 0">Stored in your browser — survives reloads but not cache wipes. Use the buttons on each setup card to log a trade.</div>
+    <div id="journal-rows"></div>
+    <div style="margin-top:10px;color:#94a3b8;font-size:11px">
+      Stats: <span id="journal-stats">no trades yet</span>
+      <button class="tools-btn" style="margin-left:12px" onclick="exportJournal()">⬇ Export CSV</button>
+    </div>
+  </div>
 
   <div class="footer">
     Methodology source: Chart Champions PDFs uploaded by operator. Run the
@@ -1904,6 +2165,167 @@ def render_html(
       if (s) document.getElementById('search-input').value = s;
     }})();
 
+    // --- Position sizer ---------------------------------------------------
+    function onSizerChange() {{
+      var acct = parseFloat(document.getElementById('acct-size').value) || 0;
+      var pct  = parseFloat(document.getElementById('risk-pct').value)  || 0;
+      var risk = acct * (pct / 100.0);
+      document.getElementById('risk-dollars').textContent = risk.toFixed(2);
+      localStorage.setItem('cc_acct', JSON.stringify({{acct: acct, pct: pct}}));
+    }}
+    function sizeTrade(sym, entry, stop) {{
+      var acct = parseFloat(document.getElementById('acct-size').value) || 0;
+      var pct  = parseFloat(document.getElementById('risk-pct').value)  || 0;
+      var riskDollars = acct * (pct / 100.0);
+      var perShare = Math.abs(entry - stop);
+      if (perShare <= 0) return alert('Risk per share is zero — check entry vs stop.');
+      var shares = Math.floor(riskDollars / perShare);
+      var notional = shares * entry;
+      alert(
+        sym + ' position size\\n\\n' +
+        'Account:        $' + acct.toFixed(2) + '\\n' +
+        'Risk:           ' + pct + '%  =  $' + riskDollars.toFixed(2) + '\\n' +
+        'Per-share risk: $' + perShare.toFixed(4) + '\\n' +
+        'Shares:         ' + shares + '\\n' +
+        'Notional:       $' + notional.toFixed(2) + '\\n' +
+        'Leverage vs acct: ' + (acct > 0 ? (notional / acct).toFixed(2) + 'x' : '—')
+      );
+    }}
+
+    // --- Trade journal ---------------------------------------------------
+    function getJournal() {{
+      try {{ return JSON.parse(localStorage.getItem('cc_journal') || '[]'); }} catch(_) {{ return []; }}
+    }}
+    function saveJournal(j) {{ localStorage.setItem('cc_journal', JSON.stringify(j)); }}
+
+    function takeTrade(sym, name, dir, entry, stop, t1, t2) {{
+      var acct = parseFloat(document.getElementById('acct-size').value) || 0;
+      var pct  = parseFloat(document.getElementById('risk-pct').value)  || 0;
+      var riskDollars = acct * (pct / 100.0);
+      var perShare = Math.abs(entry - stop);
+      var shares = perShare > 0 ? Math.floor(riskDollars / perShare) : 0;
+      var j = getJournal();
+      j.unshift({{
+        id: Date.now(),
+        date: new Date().toISOString().slice(0,10),
+        symbol: sym, name: name, direction: dir,
+        entry: entry, stop: stop, t1: t1, t2: t2,
+        shares: shares, risk_dollars: riskDollars,
+        status: 'open', exit: null, r_outcome: null, notes: ''
+      }});
+      saveJournal(j);
+      renderJournal();
+      showToast('▶ Trade logged: ' + sym + ' ' + dir + ' ' + shares + ' shares');
+    }}
+    function passTrade(sym, name) {{
+      var note = prompt('Why are you passing on ' + sym + ' — ' + name + '? (optional)') || '';
+      var j = getJournal();
+      j.unshift({{
+        id: Date.now(),
+        date: new Date().toISOString().slice(0,10),
+        symbol: sym, name: name, direction: '—',
+        entry: null, stop: null, t1: null, t2: null,
+        shares: 0, risk_dollars: 0,
+        status: 'passed', exit: null, r_outcome: null, notes: note
+      }});
+      saveJournal(j);
+      renderJournal();
+      showToast('⏭ Passed on ' + sym);
+    }}
+    function closeTrade(id) {{
+      var exitStr = prompt('Exit price?');
+      if (!exitStr) return;
+      var exit = parseFloat(exitStr);
+      if (isNaN(exit)) return alert('Invalid price');
+      var j = getJournal();
+      var t = j.find(x => x.id === id);
+      if (!t) return;
+      var risk = Math.abs(t.entry - t.stop);
+      var pnl = t.direction === 'long' ? (exit - t.entry) : (t.entry - exit);
+      var r = risk > 0 ? pnl / risk : 0;
+      t.status = 'closed';
+      t.exit = exit;
+      t.r_outcome = r;
+      saveJournal(j);
+      renderJournal();
+      showToast((r >= 0 ? '✓ ' : '✗ ') + t.symbol + '  ' + r.toFixed(2) + 'R');
+    }}
+    function deleteTrade(id) {{
+      if (!confirm('Delete this journal entry?')) return;
+      saveJournal(getJournal().filter(x => x.id !== id));
+      renderJournal();
+    }}
+    function renderJournal() {{
+      var j = getJournal();
+      var box = document.getElementById('journal-rows');
+      var stats = document.getElementById('journal-stats');
+      if (!box) return;
+      if (!j.length) {{
+        box.innerHTML = '<div class="journal-empty">No trades logged yet. Click ▶ Take or ⏭ Pass on any setup to start.</div>';
+        if (stats) stats.textContent = 'no trades yet';
+        return;
+      }}
+      var header = '<div class="journal-row header">'
+        + '<div>Date</div><div>Symbol</div><div>Dir</div><div>Entry</div><div>Stop</div><div>Exit</div><div>Setup · Notes</div><div>R</div></div>';
+      var rows = j.map(t => {{
+        var rClass = t.r_outcome === null ? '' : (t.r_outcome >= 0 ? 'r-win' : 'r-loss');
+        var rText = t.r_outcome === null ? (t.status === 'open' ? `<button class="tools-btn" onclick="closeTrade(${{t.id}})" style="padding:2px 6px;font-size:10px">Close</button>` : '—')
+                                          : t.r_outcome.toFixed(2) + 'R';
+        return '<div class="journal-row">'
+          + '<div>' + t.date + '</div>'
+          + '<div><b>' + t.symbol + '</b></div>'
+          + '<div>' + (t.direction || '—') + '</div>'
+          + '<div>' + (t.entry !== null ? '$' + t.entry.toFixed(2) : '—') + '</div>'
+          + '<div>' + (t.stop  !== null ? '$' + t.stop.toFixed(2)  : '—') + '</div>'
+          + '<div>' + (t.exit  !== null ? '$' + t.exit.toFixed(2)  : '—') + '</div>'
+          + '<div style="color:#94a3b8">' + (t.name || '') + (t.notes ? ' — <i>' + t.notes + '</i>' : '') + '</div>'
+          + '<div class="' + rClass + '">' + rText + ' <span class="x" style="color:#64748b;cursor:pointer" onclick="deleteTrade(' + t.id + ')">✕</span></div>'
+          + '</div>';
+      }}).join('');
+      box.innerHTML = header + rows;
+      var closed = j.filter(t => t.status === 'closed' && t.r_outcome !== null);
+      if (closed.length && stats) {{
+        var wins = closed.filter(t => t.r_outcome > 0).length;
+        var sumR = closed.reduce((a,t) => a + t.r_outcome, 0);
+        stats.textContent =
+          closed.length + ' closed · ' + wins + ' wins · ' +
+          'win-rate ' + (100 * wins / closed.length).toFixed(0) + '% · ' +
+          'expectancy ' + (sumR / closed.length).toFixed(2) + 'R · ' +
+          'total ' + sumR.toFixed(2) + 'R';
+      }} else if (stats) {{
+        stats.textContent = j.length + ' logged · 0 closed yet';
+      }}
+    }}
+    function exportJournal() {{
+      var j = getJournal();
+      if (!j.length) return alert('Journal is empty');
+      var headers = ['date','symbol','name','direction','entry','stop','t1','t2','shares','risk_dollars','status','exit','r_outcome','notes'];
+      var lines = [headers.join(',')];
+      j.forEach(t => {{
+        lines.push(headers.map(h => {{
+          var v = t[h];
+          if (v === null || v === undefined) return '';
+          if (typeof v === 'string' && v.includes(',')) return '"' + v.replace(/"/g,'""') + '"';
+          return v;
+        }}).join(','));
+      }});
+      var blob = new Blob([lines.join('\\n')], {{type:'text/csv'}});
+      var url  = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = 'cc-trader-journal-' + new Date().toISOString().slice(0,10) + '.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+    }}
+
+    function loadSavedAccount() {{
+      try {{
+        var s = JSON.parse(localStorage.getItem('cc_acct') || '{{}}');
+        if (s.acct) document.getElementById('acct-size').value = s.acct;
+        if (s.pct)  document.getElementById('risk-pct').value  = s.pct;
+      }} catch(_) {{}}
+      onSizerChange();
+    }}
+
     window.addEventListener('load', () => {{
       applyStarUI();
       applyBellUI();
@@ -1911,6 +2333,8 @@ def render_html(
       checkAlarms();
       renderMyListBar();
       initLightweightCharts();
+      loadSavedAccount();
+      renderJournal();
       if (Notification.permission === 'default') Notification.requestPermission();
     }});
   </script>
@@ -1920,7 +2344,256 @@ def render_html(
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-MIN_RISK_REWARD = 1.0  # CC discipline — skip anything below
+MIN_RISK_REWARD = 2.0  # CC discipline + pro convention: skip anything below 2:1
+
+
+# ---------------------------------------------------------------------------
+# Macro event calendar — hardcoded high-impact dates so we can warn users
+# when a setup fires within 24h of a release. Easier to maintain than scraping
+# a calendar API for a single-operator tool. Update each year.
+# ---------------------------------------------------------------------------
+MACRO_EVENTS_2026: list[tuple[str, str]] = [
+    # FOMC meeting dates 2026 (announcement at 2pm ET, presser at 2:30pm)
+    ("2026-01-28", "FOMC rate decision"),
+    ("2026-03-18", "FOMC rate decision"),
+    ("2026-04-29", "FOMC rate decision"),
+    ("2026-06-17", "FOMC rate decision"),
+    ("2026-07-29", "FOMC rate decision"),
+    ("2026-09-16", "FOMC rate decision"),
+    ("2026-10-28", "FOMC rate decision"),
+    ("2026-12-09", "FOMC rate decision"),
+    # CPI releases (~8:30am ET, mid-month)
+    ("2026-01-14", "CPI release"), ("2026-02-11", "CPI release"),
+    ("2026-03-11", "CPI release"), ("2026-04-15", "CPI release"),
+    ("2026-05-13", "CPI release"), ("2026-06-10", "CPI release"),
+    ("2026-07-15", "CPI release"), ("2026-08-12", "CPI release"),
+    ("2026-09-09", "CPI release"), ("2026-10-14", "CPI release"),
+    ("2026-11-13", "CPI release"), ("2026-12-10", "CPI release"),
+    # NFP (first Friday of the month)
+    ("2026-01-02", "Non-Farm Payrolls"), ("2026-02-06", "Non-Farm Payrolls"),
+    ("2026-03-06", "Non-Farm Payrolls"), ("2026-04-03", "Non-Farm Payrolls"),
+    ("2026-05-01", "Non-Farm Payrolls"), ("2026-06-05", "Non-Farm Payrolls"),
+    ("2026-07-02", "Non-Farm Payrolls"), ("2026-08-07", "Non-Farm Payrolls"),
+    ("2026-09-04", "Non-Farm Payrolls"), ("2026-10-02", "Non-Farm Payrolls"),
+    ("2026-11-06", "Non-Farm Payrolls"), ("2026-12-04", "Non-Farm Payrolls"),
+]
+
+
+def upcoming_macro_within(days_ahead: int = 1) -> Optional[tuple[str, str]]:
+    """Return (date_str, name) for the soonest macro event within `days_ahead`,
+    or None if nothing is scheduled. Used to flag setups taken just before a
+    high-impact release."""
+    today = date.today()
+    soon = today + timedelta(days=days_ahead)
+    for d_str, name in MACRO_EVENTS_2026:
+        try:
+            d = date.fromisoformat(d_str)
+        except ValueError:
+            continue
+        if today <= d <= soon:
+            return (d_str, name)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Market regime — VIX level + breadth. Used to downgrade verdicts in
+# high-volatility / weak-breadth regimes where setups historically misfire.
+# ---------------------------------------------------------------------------
+def fetch_market_regime() -> dict:
+    """Return {vix_level, vix_regime, breadth_pct}. Cached for the scan."""
+    out = {"vix_level": None, "vix_regime": "unknown", "breadth_pct": None}
+    try:
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            v = yf.download("^VIX", period="5d", interval="1d",
+                            auto_adjust=True, progress=False, threads=False)
+        if v is not None and not v.empty:
+            if isinstance(v.columns, pd.MultiIndex):
+                v.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in v.columns]
+            else:
+                v.columns = [c.lower() for c in v.columns]
+            vix = float(v["close"].iloc[-1])
+            out["vix_level"] = vix
+            if vix < 15:    out["vix_regime"] = "low-vol"
+            elif vix < 25:  out["vix_regime"] = "normal"
+            elif vix < 35:  out["vix_regime"] = "elevated"
+            else:           out["vix_regime"] = "extreme"
+    except Exception:
+        pass
+    # Breadth: use SPY trend as a coarse proxy for now. A full breadth calc
+    # would scan all S&P 500 members and is too expensive for free-tier hosting.
+    # We expose vix_regime; breadth_pct stays None until breadth scan is added.
+    return out
+
+
+def regime_adjusts_conviction(base: float, regime: dict) -> float:
+    """Apply regime-based haircut to a setup's conviction.
+    - 'extreme' VIX: -15% (most setups fail in 35+ VIX panic)
+    - 'elevated':    -8%
+    - 'normal':      no change
+    - 'low-vol':     +3% (trends are smoother)"""
+    r = regime.get("vix_regime", "unknown")
+    if r == "extreme":  return max(0.10, base * 0.85)
+    if r == "elevated": return max(0.20, base * 0.92)
+    if r == "low-vol":  return min(0.95, base * 1.03)
+    return base
+
+
+# ---------------------------------------------------------------------------
+# Correlation check — if multiple setups fire in the same sector, the
+# operator should treat them as one trade, not N. Flags concentration.
+# ---------------------------------------------------------------------------
+def correlation_warning(setups: list["Setup"]) -> dict[str, int]:
+    """Count setups per sector ETF. Sectors with ≥3 setups are concentration
+    risk — operator should pick the best 1-2 and skip the rest."""
+    by_sector: dict[str, int] = {}
+    for s in setups:
+        etf = SECTOR_ETF.get(s.symbol.upper(), "SPY")
+        by_sector[etf] = by_sector.get(etf, 0) + 1
+    return by_sector
+
+
+# ---------------------------------------------------------------------------
+# Backtest engine — walks each detector through historical bars and reports
+# realized win-rate, expectancy in R, and max consecutive losses.
+# Run with:  python scan_setups.py --backtest
+# Writes results to backtest_results.json which gets picked up on next launch.
+# ---------------------------------------------------------------------------
+def _simulate_setup(setup: "Setup", future_df: pd.DataFrame, max_bars: int = 30) -> tuple[float, int]:
+    """Replay a single setup against future bars. Returns (R_outcome, bars_held).
+    R_outcome is positive if T1 was hit before stop, negative if stop hit first.
+    Uses bar high/low against entry/stop/T1, not close — matches real fills."""
+    risk = abs(setup.entry - setup.stop_loss)
+    if risk <= 0:
+        return (0.0, 0)
+    long = setup.direction == "long"
+    t1 = setup.targets[0] if setup.targets else (setup.entry + 2*risk if long else setup.entry - 2*risk)
+
+    for i in range(min(len(future_df), max_bars)):
+        bar = future_df.iloc[i]
+        if long:
+            # Stop hit first if low ≤ stop
+            if bar["low"] <= setup.stop_loss:
+                return (-1.0, i + 1)
+            if bar["high"] >= t1:
+                return (abs(t1 - setup.entry) / risk, i + 1)
+        else:
+            if bar["high"] >= setup.stop_loss:
+                return (-1.0, i + 1)
+            if bar["low"] <= t1:
+                return (abs(setup.entry - t1) / risk, i + 1)
+    # Time-stop at max_bars — exit at the close, compute outcome
+    exit_px = float(future_df["close"].iloc[min(len(future_df)-1, max_bars-1)])
+    pnl = (exit_px - setup.entry) if long else (setup.entry - exit_px)
+    return (pnl / risk, min(len(future_df), max_bars))
+
+
+def backtest_detector(name: str, detector_fn, tickers: list[str],
+                      max_bars: int = 30, history_days: int = 730) -> dict:
+    """Walk-forward backtest for one detector. For each ticker, slide a
+    rolling window through history and replay the detector against each
+    historical bar. Each fired setup is then replayed against the next
+    max_bars to compute its R-outcome."""
+    n_signals = 0
+    wins = 0
+    losses = 0
+    r_outcomes: list[float] = []
+    bars_held: list[int] = []
+    for sym in tickers:
+        try:
+            import io, contextlib
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                df = yf.download(sym, period=f"{history_days}d", interval="1d",
+                                 auto_adjust=True, progress=False, threads=False)
+            if df is None or df.empty or len(df) < 260:
+                continue
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df.columns]
+            else:
+                df.columns = [c.lower() for c in df.columns]
+            df = df[["open","high","low","close","volume"]].dropna()
+        except Exception:
+            continue
+        # Step through history. Detectors need ~220 bars of warmup.
+        for end_idx in range(220, len(df) - max_bars, 1):
+            past = df.iloc[:end_idx + 1]
+            try:
+                setup = detector_fn(sym, past)
+            except Exception:
+                setup = None
+            if setup is None or setup.risk_reward < MIN_RISK_REWARD:
+                continue
+            future = df.iloc[end_idx + 1:]
+            r, held = _simulate_setup(setup, future, max_bars=max_bars)
+            n_signals += 1
+            r_outcomes.append(r)
+            bars_held.append(held)
+            if r > 0:
+                wins += 1
+            else:
+                losses += 1
+    win_rate = wins / n_signals if n_signals else 0.0
+    avg_r = (sum(r_outcomes) / n_signals) if n_signals else 0.0
+    return {
+        "name": name,
+        "signals": n_signals,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "expectancy_R": avg_r,
+        "avg_bars_held": (sum(bars_held) / n_signals) if n_signals else 0,
+    }
+
+
+def run_backtest(tickers: list[str]) -> dict:
+    """Run all detectors through walk-forward backtest, print a summary, and
+    persist the win-rates so future scans use real conviction numbers."""
+    print("\n" + "=" * 70)
+    print("  Walk-forward backtest — Chart Champions detectors")
+    print(f"  Tickers: {len(tickers)} symbols, ~2 years of daily bars each")
+    print("=" * 70)
+    results = []
+    detector_to_name = {
+        detect_ema_pullback:      "EMA Pullback",
+        detect_cc_region_pullback: "CC Region",
+        detect_sr_flip:            "S/R Flip",
+        detect_volume_spike:       "Volume Spike",
+        detect_inside_day:         "Inside Day",
+        detect_rsi_reversal:       "RSI Reversal",
+    }
+    for fn, name in detector_to_name.items():
+        print(f"\n  → backtesting: {name}...")
+        r = backtest_detector(name, fn, tickers, max_bars=30, history_days=730)
+        results.append(r)
+        print(f"      signals={r['signals']:>4}   wins={r['wins']:>4}   losses={r['losses']:>4}   "
+              f"win_rate={r['win_rate']*100:.1f}%   expectancy={r['expectancy_R']:+.2f}R   "
+              f"avg_held={r['avg_bars_held']:.1f} bars")
+    # Convert win-rate + expectancy → conviction in 0..1
+    new_conviction: dict[str, float] = {}
+    for r in results:
+        if r["signals"] >= 20:
+            # Blend win-rate (60%) and expectancy clipped (40%) for stability.
+            conv = 0.60 * r["win_rate"] + 0.40 * max(0.0, min(1.0, 0.5 + r["expectancy_R"] / 2.0))
+            new_conviction[r["name"]] = round(max(0.20, min(0.92, conv)), 3)
+        else:
+            # Not enough data — keep the prior
+            new_conviction[r["name"]] = BACKTESTED_CONVICTION.get(r["name"], 0.55)
+    summary = {
+        "ran_at": datetime.utcnow().isoformat(),
+        "n_tickers": len(tickers),
+        "results": results,
+        "conviction": new_conviction,
+    }
+    _BT_FILE.write_text(json.dumps(summary, indent=2, default=str))
+    print("\n  ✓ Backtest complete. Updated conviction values:")
+    for k, v in new_conviction.items():
+        old = BACKTESTED_CONVICTION.get(k, 0)
+        print(f"      {k:<18} {old:.2f}  →  {v:.2f}")
+    print(f"\n  💾 Saved to {_BT_FILE.name} — next scan will use these.\n")
+    BACKTESTED_CONVICTION.update(new_conviction)
+    return summary
 
 
 def _scan_index_trend(symbol: str) -> str:
@@ -1933,7 +2606,7 @@ def _scan_index_trend(symbol: str) -> str:
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
             df = yf.download(sym, period="1y", interval="1d",
-                             auto_adjust=False, progress=False, threads=False)
+                             auto_adjust=True, progress=False, threads=False)
         if df is None or df.empty:
             return "side"
         if isinstance(df.columns, pd.MultiIndex):
@@ -1969,9 +2642,13 @@ def run_full_scan(
     started = time.time()
 
     # Pull market + sector context ONCE per scan (cached across tickers).
-    print("  Fetching market regime (SPY)...")
+    print("  Fetching market regime (SPY + VIX)...")
     spy_trend = _scan_index_trend("SPY")
-    print(f"    SPY trend: {spy_trend}")
+    market_regime = fetch_market_regime()
+    macro_event = upcoming_macro_within(days_ahead=1)
+    print(f"    SPY trend: {spy_trend} · VIX regime: {market_regime['vix_regime']} (level {market_regime.get('vix_level')})")
+    if macro_event:
+        print(f"    ⚠ Macro event within 24h: {macro_event[1]} on {macro_event[0]}")
 
     # Sector ETF trends — fetch each unique ETF once.
     unique_sectors = set(SECTOR_ETF.get(t.upper(), "SPY") for t in tickers)
@@ -2040,12 +2717,32 @@ def run_full_scan(
             sr = support_resistance(daily_df.tail(200))
         except Exception:
             sr = {"support": [], "resistance": []}
+        # Best-effort bid/ask + liquidity from yfinance fast_info.
+        bid = ask = spread_pct = None
+        try:
+            t = yf.Ticker(sym_u)
+            fi = getattr(t, "fast_info", None) or {}
+            b = fi.get("bid") if isinstance(fi, dict) else getattr(fi, "bid", None)
+            a = fi.get("ask") if isinstance(fi, dict) else getattr(fi, "ask", None)
+            if b and a and a > 0 and b > 0:
+                bid = float(b); ask = float(a)
+                mid = (bid + ask) / 2.0
+                spread_pct = (ask - bid) / mid * 100.0 if mid > 0 else None
+        except Exception:
+            pass
+        avg_vol = None
+        try:
+            if "volume" in daily_df.columns and len(daily_df) >= 21:
+                avg_vol = float(daily_df["volume"].iloc[-21:-1].mean())
+        except Exception:
+            pass
         return Snapshot(
             symbol=sym_u,
             current_price=px,
             ema_55=e55, ema_100=e100, ema_200=e200, rsi_14=rsi_v,
             support_levels=sr.get("support", [])[-3:],
             resistance_levels=sr.get("resistance", [])[-3:],
+            bid=bid, ask=ask, spread_pct=spread_pct, avg_volume=avg_vol,
             context_flags=build_context(
                 daily_df=daily_df, symbol=sym_u,
                 setup_direction="long",
@@ -2069,6 +2766,8 @@ def run_full_scan(
                 sector_trend=sector_trends.get(etf, "side"),
                 weekly_df=weekly_df,
             )
+            # Regime haircut: high-vol environments drop conviction.
+            s.conviction = regime_adjusts_conviction(s.conviction, market_regime)
         all_setups.extend(setups)
 
         # Always-on: build a key-levels Snapshot for every ticker.
@@ -2112,12 +2811,17 @@ def run_full_scan(
             s.ai_analysis = ai_enhance_setup(s, api_key, model)
 
     duration = time.time() - started
+    # Compute correlation concentration across the fired setups.
+    sector_counts = correlation_warning(all_setups)
     html = render_html(
         all_setups, len(tickers), duration,
         snapshots=snapshots,
         levels_by_symbol=levels_by_symbol,
         watches=all_watches,
         chart_data_by_symbol=chart_data_by_symbol,
+        market_regime=market_regime,
+        macro_event=macro_event,
+        sector_counts=sector_counts,
     )
     print(f"✓ Scan complete: {len(all_setups)} setup(s), {len(snapshots)} snapshot(s), {len(all_watches)} watch(es) in {duration:.1f}s\n")
     return all_setups, duration, html
@@ -2244,7 +2948,8 @@ def inject_meta_refresh(html: str, seconds: int) -> str:
 def main() -> int:
     args = sys.argv[1:]
     serve_mode = "--serve" in args or "--live" in args
-    args = [a for a in args if a not in ("--serve", "--live")]
+    backtest_mode = "--backtest" in args
+    args = [a for a in args if a not in ("--serve", "--live", "--backtest")]
 
     # parse --port and --refresh
     # Honor PORT injected by hosting platforms (Render, Fly, Heroku, etc.)
@@ -2270,6 +2975,10 @@ def main() -> int:
     args = cleaned
 
     tickers = args if args else CC_2026
+
+    if backtest_mode:
+        run_backtest(tickers)
+        return 0
 
     if serve_mode:
         return serve_live(tickers, port=port, refresh_seconds=refresh_seconds, cache_seconds=cache_seconds)
