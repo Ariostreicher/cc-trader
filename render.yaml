@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: cc-trader
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: pip install -r requirements_standalone.txt
+    startCommand: python scan_setups.py --serve --port $PORT --refresh 60 --cache 600
+    autoDeploy: true
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false           # set in Render dashboard — don't commit it
+      - key: OPENAI_MODEL_CHAT
+        value: llama-3.3-70b-versatile
+      - key: PYTHON_VERSION
+        value: 3.11.9

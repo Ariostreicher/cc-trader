@@ -1,0 +1,6 @@
+.env
+.env.bak
+__pycache__/
+*.pyc
+cc_setups_report.html
+.DS_Store
