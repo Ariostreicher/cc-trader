@@ -3426,14 +3426,13 @@ def scan_one(symbol: str) -> tuple[Optional[pd.DataFrame], list[Setup], Optional
             # Pull 5 years of daily history — captures multi-year highs/lows
             # (e.g., CELH 2024 ATH ~$100 → $20 → recovery). CC traders work
             # off these multi-year levels as primary support/resistance.
+            # Weekly is RESAMPLED from daily below — no separate fetch
+            # (cuts yfinance load roughly in half, prevents Render OOM/timeout).
             df = yf.download(
                 sym, period="5y", interval="1d",
                 auto_adjust=True, progress=False, threads=False,
             )
-            weekly = yf.download(
-                sym, period="10y", interval="1wk",
-                auto_adjust=True, progress=False, threads=False,
-            )
+            weekly = None
     except Exception:
         return None, [], None
     if df is None or df.empty:
@@ -3450,6 +3449,15 @@ def scan_one(symbol: str) -> tuple[Optional[pd.DataFrame], list[Setup], Optional
 
     df = _normalize(df)
     weekly_n = _normalize(weekly)
+    # If weekly wasn't fetched separately (Wave 11 hotfix), resample from daily.
+    # This produces the same HTF trend signal at zero extra network cost.
+    if weekly_n is None and df is not None and not df.empty:
+        try:
+            weekly_n = resample_period(df, "W")
+            if weekly_n is not None and weekly_n.empty:
+                weekly_n = None
+        except Exception:
+            weekly_n = None
 
     out: list[Setup] = []
     for fn in DETECTORS:
@@ -6312,7 +6320,12 @@ def run_full_scan(
             ),
         )
 
+    # Small inter-ticker sleep avoids yfinance rate-limit + Render-side
+    # gateway timeout when many tickers are scanned in a row.
+    import time as _time
     for i, sym in enumerate(tickers, 1):
+        if i > 1:
+            _time.sleep(0.15)
         daily_df, setups, weekly_df = scan_one(sym)
         setups = [s for s in setups if s.risk_reward >= MIN_RISK_REWARD]
         sym_u = sym.upper()
