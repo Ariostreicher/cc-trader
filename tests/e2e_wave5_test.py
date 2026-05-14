@@ -202,13 +202,14 @@ setup = cc.Setup(
     current_price=100.0, conviction=0.7, reasoning="x", citation="x",
     context_flags=[],
 )
-html_setup = cc.render_html(
-    setups=[setup], scanned=1, duration_s=0.1,
-    levels_by_symbol={"TEST": snap},
-    chart_data_by_symbol=chart_data,
+# Wave 12: chart moved to /chart page (render_single_chart_html)
+html_setup = cc.render_single_chart_html(
+    symbol="TEST", snap=snap,
+    chart_data=chart_data["TEST"],
+    setups=[setup],
 )
-m2 = re.search(r'id="lwc_0" data-symbol="TEST" data-lines=\'([^\']+)\'', html_setup)
-check("setup chart has data-lines",  m2 is not None)
+m2 = re.search(r'id="lwc_chart_solo" data-symbol="TEST" data-lines=\'([^\']+)\'', html_setup)
+check("setup chart has data-lines (on /chart page)",  m2 is not None)
 if m2:
     s_lines = _json.loads(m2.group(1))
     s_titles = [l["title"] for l in s_lines]

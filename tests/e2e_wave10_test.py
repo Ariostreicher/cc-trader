@@ -49,11 +49,19 @@ chart_data = {"AAPL": {
                "ema_55":[], "ema_100":[], "ema_200":[]},
     },
 }}
-html = cc.render_html(
+# Wave 12: the hybrid view toggle + annotations + countdown moved to /chart
+# page (memory fix). Main page (render_html) now has compact cards. All Wave-10
+# toolbar UI tests now check render_single_chart_html.
+html_main = cc.render_html(
     setups=[setup], scanned=1, duration_s=0.1,
     snapshots=[snap],
     levels_by_symbol={"AAPL": snap},
     chart_data_by_symbol=chart_data,
+)
+html = cc.render_single_chart_html(
+    symbol="AAPL", snap=snap,
+    chart_data=chart_data["AAPL"],
+    setups=[setup],
 )
 
 
@@ -102,13 +110,15 @@ check("widget enables drawing tools (default)",
 
 
 # ---------------------------------------------------------------------------
-# 4. View toggle JS wiring
+# 4. View toggle JS wiring (Wave 12: inline in initChart on /chart page)
 # ---------------------------------------------------------------------------
 print("\n[4] View toggle JS wiring")
-check("_bindViewToggles() defined",          "function _bindViewToggles()" in html)
-check("_bindViewToggles() called on load",   "_bindViewToggles();" in html)
+check("view-toggle wiring exists (either _bindViewToggles or inline init)",
+      "function _bindViewToggles()" in html or "querySelectorAll('.view-btn')" in html)
+check("view-toggle load handler runs",
+      "_bindViewToggles();" in html or "querySelectorAll('.view-btn').forEach" in html)
 check("clicking TV button triggers loadTradingViewWidget",
-      "loadTradingViewWidget(" in html and "view === 'tv'" in html)
+      "loadTradingViewWidget(" in html and ("view === 'tv'" in html or "tv.dataset.tvSymbol" in html))
 check("lazy-loading flag (cc_tv_loaded)",    "cc_tv_loaded" in html)
 
 
@@ -121,11 +131,12 @@ check("'+ Line' button present",             "+ Line" in html)
 check("'⌫ Clear my drawings' button present", "Clear my drawings" in html)
 check("addAnnotation() function defined",    "function addAnnotation(" in html)
 check("clearAnnotations() function defined", "function clearAnnotations(" in html)
-check("applyAnnotationsToChart() function",  "function applyAnnotationsToChart(" in html)
+check("annotation-apply function exists (applyAnnotations or applyAnnotationsToChart)",
+      "function applyAnnotationsToChart(" in html or "function applyAnnotations(" in html)
 check("annotations stored in cc_annotations localStorage key",
       "cc_annotations" in html)
-check("applyAllAnnotationsOnLoad() called on page load",
-      "applyAllAnnotationsOnLoad()" in html)
+check("annotations re-applied on load (applyAllAnnotationsOnLoad or applyAnnotations on init)",
+      "applyAllAnnotationsOnLoad()" in html or "applyAnnotations(sym, 'chart_solo')" in html)
 
 
 # ---------------------------------------------------------------------------
@@ -133,9 +144,10 @@ check("applyAllAnnotationsOnLoad() called on page load",
 # ---------------------------------------------------------------------------
 print("\n[6] 24h countdown badge")
 check("countdown-badge HTML element present",   'class="countdown-badge"' in html)
-check("updateCountdownBadges() defined",        "function updateCountdownBadges()" in html)
+check("countdown function defined (updateCountdownBadges or updateCountdown)",
+      "function updateCountdownBadges()" in html or "function updateCountdown()" in html)
 check("countdown refreshed every minute via setInterval",
-      "setInterval(updateCountdownBadges" in html)
+      "setInterval(updateCountdownBadges" in html or "setInterval(updateCountdown" in html)
 check("countdown differentiates crypto vs stocks",
       "isCrypto" in html and "-USD" in html)
 check("countdown skips weekends for stocks",
@@ -156,15 +168,14 @@ check(".tv-widget-host CSS", ".tv-widget-host {" in html)
 
 
 # ---------------------------------------------------------------------------
-# 8. Both setup-card AND snapshot-card paths get the toolbar
+# 8. Wave 12: charts moved to /chart page (memory fix). The toolbar — view
+#    toggle, annotations, countdown — is on every /chart page.
 # ---------------------------------------------------------------------------
-print("\n[8] Toolbar appears on both setup cards and snapshot cards")
-# Setup card uses chart-host with data-chart-idx="setup_*"
-check("setup card has chart-host with setup_* idx",
-      'data-chart-idx="setup_' in html)
-# Snapshot card uses snap_* idx
-check("snapshot card has chart-host with snap_* idx",
-      'data-chart-idx="snap_' in html)
+print("\n[8] Chart-page toolbar present (Wave 12 — chart opens in new tab)")
+check("/chart page has chart-host with chart_solo idx",
+      'data-chart-idx="chart_solo"' in html)
+check("main page has 'Open Chart →' links to /chart?symbol=X",
+      '/chart?symbol=AAPL' in html_main and 'Open Chart' in html_main)
 
 
 # ---------------------------------------------------------------------------
@@ -184,9 +195,10 @@ print("\n[10] Regressions: prior features intact")
 check("38 detectors registered",            len(cc.DETECTORS) == 38)
 check("Lightweight Charts price lines still drawn",
       "createPriceLine(" in html)
-check("Trade Journal panel still present",  'id="journal-panel"' in html)
-check("Manual setup section still present", 'id="manual-section"' in html)
-check("My Watchlist bar still present",     'class="mylist-bar"' in html)
+# Wave 12: these features live on the MAIN page, not on /chart
+check("Trade Journal panel still on main page",  'id="journal-panel"' in html_main)
+check("Manual setup section still on main page", 'id="manual-section"' in html_main)
+check("My Watchlist bar still on main page",     'class="mylist-bar"' in html_main)
 
 
 # ---------------------------------------------------------------------------

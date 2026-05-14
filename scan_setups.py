@@ -233,6 +233,8 @@ class Snapshot:
     naked_pocs: List[dict] = field(default_factory=list)
     # Wave 7: Structured Equity Analysis Model (fundamental backdrop)
     equity_analysis: Optional[dict] = None
+    # Wave 12: Camarilla pivots (alternative intraday reference)
+    camarilla: Optional[dict] = None
 
 
 @dataclass
@@ -3649,6 +3651,15 @@ def _snap_chart_body(snap, idx: int, chart_data_by_symbol: dict) -> str:
     # Naked POCs
     for n in (getattr(snap, "naked_pocs", []) or [])[:6]:
         lines.append({"price": float(n["poc"]), "color": "#06b6d4", "lineStyle": 2, "lineWidth": 1, "title": f"nPOC ${float(n['poc']):.2f}"})
+    # Camarilla pivots (teal — intraday reference)
+    cam = getattr(snap, "camarilla", None)
+    if cam:
+        for key, label in [("h4","H4"),("h3","H3"),("h2","H2"),("h1","H1"),
+                           ("l1","L1"),("l2","L2"),("l3","L3"),("l4","L4")]:
+            if key in cam:
+                lines.append({"price": float(cam[key]), "color": "#14b8a688",
+                              "lineStyle": 2, "lineWidth": 1,
+                              "title": f"CAM {label} ${float(cam[key]):.2f}"})
     # VWAP
     if snap.vwap_anchored is not None:
         lines.append({
@@ -4052,6 +4063,16 @@ def render_html(
                     "lineStyle": 2, "lineWidth": 1,
                     "title": f"nPOC ${float(n['poc']):.2f}",
                 })
+            # Camarilla pivots (if Snapshot carries them) — teal tones
+            cam = getattr(snap, "camarilla", None)
+            if cam:
+                for key, label in [("h4","H4"),("h3","H3"),("h2","H2"),("h1","H1"),
+                                   ("l1","L1"),("l2","L2"),("l3","L3"),("l4","L4")]:
+                    if key in cam:
+                        color = "#14b8a688" if key.startswith("h") else "#14b8a688"
+                        lines.append({"price": float(cam[key]), "color": color,
+                                      "lineStyle": 2, "lineWidth": 1,
+                                      "title": f"CAM {label} ${float(cam[key]):.2f}"})
             # Anchored VWAP — solid blue
             if snap.vwap_anchored is not None:
                 lines.append({
@@ -4121,43 +4142,19 @@ def render_html(
             if has_data
             else '<div class="lwc-fallback">📉 Chart data unavailable — try refreshing.</div>'
         )
+        # Wave 12: fired-setup card is compact — chart opens in new tab.
+        # The setup details (entry/stop/targets/conviction/AI commentary) stay
+        # right here in the levels_html so you see them immediately.
         charts.append(f"""
-        <div class="ticker-block" id="chart-{i}">
-          <h2>{s.symbol} <span class="tv-link">·
-            <a href="https://www.tradingview.com/chart/?symbol={tv}" target="_blank">open on TradingView →</a>
-          </span></h2>
-          <div class="chart-row">
-            <div class="chart-host" data-symbol="{s.symbol}" data-chart-idx="setup_{i}">
-              <div class="chart-toolbar">
-                <div class="view-toggle">
-                  <button class="view-btn active" data-view="cc" data-target="setup_{i}">📊 CC View</button>
-                  <button class="view-btn" data-view="tv" data-target="setup_{i}">📈 TradingView</button>
-                </div>
-                <div class="chart-extras">
-                  <span class="countdown-badge" id="cd_setup_{i}">⏱ —</span>
-                  <button class="anno-btn" onclick="addAnnotation('{s.symbol}','setup_{i}','note')">✏ Note</button>
-                  <button class="anno-btn" onclick="addAnnotation('{s.symbol}','setup_{i}','line')">+ Line</button>
-                  <button class="anno-btn" onclick="clearAnnotations('{s.symbol}','setup_{i}')">⌫ Clear my drawings</button>
-                </div>
-              </div>
-              <div class="view-cc" data-view-id="setup_{i}">
-                <div class="lwc-wrap">
-                  <div class="tf-bar">
-                    <button class="tf-btn" data-tf="1H">1H</button>
-                    <button class="tf-btn" data-tf="1D">1D</button>
-                    <button class="tf-btn" data-tf="1W">1W</button>
-                    <button class="tf-btn" data-tf="1M">1M</button>
-                  </div>
-                  {chart_body}
-                  <div class="lwc-legend" id="lg_{i}"></div>
-                </div>
-              </div>
-              <div class="view-tv" data-view-id="setup_{i}" data-tv-symbol="{tv}" style="display:none">
-                <div class="tv-widget-host" id="tv_host_setup_{i}"></div>
-              </div>
-            </div>
-            <div class="setups-side">{levels_html}</div>
-          </div>
+        <div class="ticker-block ticker-compact" id="chart-{i}">
+          <h2>{s.symbol}
+            <span class="tv-link">·
+              <a href="/chart?symbol={s.symbol}" target="_blank" class="open-chart-btn">📊 Open Chart →</a>
+              ·
+              <a href="https://www.tradingview.com/chart/?symbol={tv}" target="_blank">open on TradingView →</a>
+            </span>
+          </h2>
+          <div class="setups-side">{levels_html}</div>
         </div>
         """)
     charts_html = "\n".join(charts)
@@ -4341,59 +4338,26 @@ def render_html(
             lines.append(f"<div><span class='lbl'>Support</span><span class='val'>{', '.join(f'${s:.2f}' for s in snap.support_levels)}</span></div>")
         if snap.resistance_levels:
             lines.append(f"<div><span class='lbl'>Resistance</span><span class='val'>{', '.join(f'${s:.2f}' for s in snap.resistance_levels)}</span></div>")
+        # Wave 12: compact snapshot card — NO pre-rendered chart (saves memory).
+        # Chart opens in a new tab via /chart?symbol=X (full CC experience there).
         snap_blocks.append(f"""
-        <div class="ticker-block" id="chart-{snap_idx}">
-          <h2>{snap.symbol} <span class="tv-link">· no CC setup right now — chart only ·
-            <a href="https://www.tradingview.com/chart/?symbol={tv}" target="_blank">open on TradingView →</a>
-          </span></h2>
-          <div class="chart-row">
-            <div class="chart-host" data-symbol="{snap.symbol}" data-chart-idx="snap_{snap_idx}">
-              <div class="chart-toolbar">
-                <div class="view-toggle">
-                  <button class="view-btn active" data-view="cc" data-target="snap_{snap_idx}">📊 CC View</button>
-                  <button class="view-btn" data-view="tv" data-target="snap_{snap_idx}">📈 TradingView</button>
-                </div>
-                <div class="chart-extras">
-                  <span class="countdown-badge" id="cd_snap_{snap_idx}">⏱ —</span>
-                  <button class="anno-btn" onclick="addAnnotation('{snap.symbol}','snap_{snap_idx}','note')">✏ Note</button>
-                  <button class="anno-btn" onclick="addAnnotation('{snap.symbol}','snap_{snap_idx}','line')">+ Line</button>
-                  <button class="anno-btn" onclick="clearAnnotations('{snap.symbol}','snap_{snap_idx}')">⌫ Clear my drawings</button>
-                </div>
-              </div>
-              <div class="view-cc" data-view-id="snap_{snap_idx}">
-                <div class="lwc-wrap">
-                  <div class="tf-bar">
-                    <button class="tf-btn" data-tf="1H">1H</button>
-                    <button class="tf-btn" data-tf="1D">1D</button>
-                    <button class="tf-btn" data-tf="1W">1W</button>
-                    <button class="tf-btn" data-tf="1M">1M</button>
-                  </div>
-                  {_snap_chart_body(snap, snap_idx, chart_data_by_symbol)}
-                  <div class="lwc-legend" id="lg_snap_{snap_idx}"></div>
-                </div>
-              </div>
-              <div class="view-tv" data-view-id="snap_{snap_idx}" data-tv-symbol="{tv}" style="display:none">
-                <div class="tv-widget-host" id="tv_host_snap_{snap_idx}"></div>
-              </div>
+        <div class="ticker-block ticker-compact" id="chart-{snap_idx}">
+          <div class="setup-card">
+            <div class="setup-head" style="color:#94a3b8;display:flex;justify-content:space-between;align-items:center">
+              <span>📊 {snap.symbol} · CC context</span>
+              <span class="snap-actions">
+                <a href="/chart?symbol={snap.symbol}" target="_blank" class="open-chart-btn" title="Open full chart in new tab">📊 Open Chart →</a>
+                <button class="star-btn" data-symbol="{snap.symbol}" onclick="toggleStar(event,'{snap.symbol}')" title="Add to My Watchlist">☆</button>
+                <button class="bell-btn" data-symbol="{snap.symbol}" data-price="{snap.current_price:.2f}" onclick="setAlarm(event,'{snap.symbol}',{snap.current_price:.2f})" title="Set price alarm">🔔</button>
+                <button class="add-list-btn" onclick="addToMyListBySymbol(event,'{snap.symbol}')" title="Add to My Watchlist">+ List</button>
+                <button class="add-list-btn" onclick="openManualSetupModal('{snap.symbol}',{snap.current_price:.2f})" title="Add manual setup for this ticker">✎ Setup</button>
+              </span>
             </div>
-            <div class="setups-side">
-              <div class="setup-card">
-                <div class="setup-head" style="color:#94a3b8;display:flex;justify-content:space-between;align-items:center">
-                  <span>📊 {snap.symbol} · CC context</span>
-                  <span class="snap-actions">
-                    <button class="star-btn" data-symbol="{snap.symbol}" onclick="toggleStar(event,'{snap.symbol}')" title="Add to My Watchlist">☆</button>
-                    <button class="bell-btn" data-symbol="{snap.symbol}" data-price="{snap.current_price:.2f}" onclick="setAlarm(event,'{snap.symbol}',{snap.current_price:.2f})" title="Set price alarm">🔔</button>
-                    <button class="add-list-btn" onclick="addToMyListBySymbol(event,'{snap.symbol}')" title="Add to My Watchlist">+ List</button>
-                    <button class="add-list-btn" onclick="openManualSetupModal('{snap.symbol}',{snap.current_price:.2f})" title="Add manual setup for this ticker">✎ Setup</button>
-                  </span>
-                </div>
-                {_render_key_levels_panel(snap)}
-                {_render_equity_panel(getattr(snap, "equity_analysis", None))}
-                {_render_flags(snap.context_flags)}
-                <div class="rationale" style="margin-top:10px">
-                  No Chart Champions setup is firing on this ticker right now. Use the chart + values above to monitor it. When a CC pattern develops (EMA pullback, CC region retracement, S/R flip, etc.) it will appear in the table on the next scan.
-                </div>
-              </div>
+            {_render_key_levels_panel(snap)}
+            {_render_equity_panel(getattr(snap, "equity_analysis", None))}
+            {_render_flags(snap.context_flags)}
+            <div class="rationale" style="margin-top:10px">
+              No Chart Champions setup is firing on this ticker right now. Click <b>📊 Open Chart →</b> to see candles + all levels (Fibs, pivots, POC, nPOC, VWAP, Camarilla, EMAs) on the full chart page.
             </div>
           </div>
         </div>
@@ -4425,6 +4389,12 @@ def render_html(
   .ticker-block {{ background:#0f172a; border-radius:12px; padding:16px; margin-top:18px; }}
   .chart-row {{ display:grid; grid-template-columns: minmax(0, 1fr) 380px; gap:16px; }}
   @media (max-width: 1100px) {{ .chart-row {{ grid-template-columns: 1fr; }} }}
+
+  /* Wave 12 — compact ticker cards (chart opens in new tab via /chart?symbol=X) */
+  .ticker-compact {{ padding:10px 16px; }}
+  .ticker-compact h2 {{ margin:0 0 8px 0; font-size:15px; }}
+  .open-chart-btn {{ padding:5px 12px; background:#22c55e; color:#000; text-decoration:none; border-radius:4px; font-size:11px; font-weight:700; font-family:ui-monospace,monospace; }}
+  .open-chart-btn:hover {{ background:#16a34a; }}
 
   /* Hybrid chart host — switches between CC LWC view and TradingView widget */
   .chart-host {{ background:#0a0f1c; border-radius:8px; padding:8px; position:relative; }}
@@ -4862,6 +4832,8 @@ def render_html(
           s.setData(series);
           emaSeries[key] = s;
         }}
+        addEMA('ema_8',   initial.ema_8,   '#fbbf24', 'EMA 8');
+        addEMA('ema_21',  initial.ema_21,  '#f59e0b', 'EMA 21');
         addEMA('ema_55',  initial.ema_55,  '#94a3b8', 'EMA 55');
         addEMA('ema_100', initial.ema_100, '#cbd5e1', 'EMA 100');
         addEMA('ema_200', initial.ema_200, '#64748b', 'EMA 200');
@@ -4892,6 +4864,8 @@ def render_html(
         if (legend) {{
           legend.innerHTML =
             '<div class="lg-row"><span class="lg-dot" style="background:#22c55e"></span> Bull candle</div>'
+          + '<div class="lg-row"><span class="lg-dot" style="background:#fbbf24"></span> EMA 8</div>'
+          + '<div class="lg-row"><span class="lg-dot" style="background:#f59e0b"></span> EMA 21</div>'
           + '<div class="lg-row"><span class="lg-dot" style="background:#94a3b8"></span> EMA 55</div>'
           + '<div class="lg-row"><span class="lg-dot" style="background:#cbd5e1"></span> EMA 100</div>'
           + '<div class="lg-row"><span class="lg-dot" style="background:#64748b"></span> EMA 200</div>'
@@ -4943,7 +4917,7 @@ def render_html(
       h.candleSeries.setData(tfData.candles);
       if (h.volSeries && tfData.volume) h.volSeries.setData(tfData.volume);
       // Refresh EMA series. Some TFs may not have EMAs (not enough bars).
-      ['ema_55','ema_100','ema_200'].forEach(function(k) {{
+      ['ema_8','ema_21','ema_55','ema_100','ema_200'].forEach(function(k) {{
         var s = h.emaSeries[k];
         if (s) {{
           s.setData(tfData[k] || []);
@@ -6062,6 +6036,169 @@ def _scan_index_trend(symbol: str) -> str:
         return "side"
 
 
+# ---------------------------------------------------------------------------
+# Wave 12 — single-ticker helpers used by /chart route + reused by run_full_scan.
+# These are module-level so they can be called from anywhere (not closure-bound).
+# ---------------------------------------------------------------------------
+def serialize_chart_tf(d: pd.DataFrame, daily_format: bool) -> dict:
+    """Serialize one OHLCV timeframe → dict for Lightweight Charts.
+    daily_format=True → time as 'YYYY-MM-DD'; False → unix seconds (intraday).
+    Includes EMA 8 / 21 / 55 / 100 / 200 as line series.
+    """
+    if d is None or d.empty:
+        return {"candles": [], "volume": [],
+                "ema_8": [], "ema_21": [],
+                "ema_55": [], "ema_100": [], "ema_200": []}
+    d = d.copy()
+    if daily_format:
+        times = [t.strftime("%Y-%m-%d") if hasattr(t, "strftime") else str(t) for t in d.index]
+    else:
+        times = [int(t.timestamp()) if hasattr(t, "timestamp") else 0 for t in d.index]
+    candles = []
+    for ts, row in zip(times, d.itertuples(index=False)):
+        candles.append({"time": ts, "open": float(row.open), "high": float(row.high),
+                        "low": float(row.low), "close": float(row.close)})
+    vols, prev_c = [], None
+    for ts, row in zip(times, d.itertuples(index=False)):
+        v = float(row.volume) if not pd.isna(row.volume) else 0
+        color = "#22c55e55" if (prev_c is None or row.close >= prev_c) else "#ef444455"
+        vols.append({"time": ts, "value": v, "color": color})
+        prev_c = row.close
+    close_s = d["close"]
+    def _ema_series(length: int) -> list[dict]:
+        s = ema(close_s, length)
+        return [{"time": ts, "value": float(v)} for ts, v in zip(times, s.values) if pd.notna(v)]
+    return {
+        "candles": candles,
+        "volume":  vols,
+        "ema_8":   _ema_series(8)   if len(close_s) > 8   else [],
+        "ema_21":  _ema_series(21)  if len(close_s) > 21  else [],
+        "ema_55":  _ema_series(55)  if len(close_s) > 55  else [],
+        "ema_100": _ema_series(100) if len(close_s) > 100 else [],
+        "ema_200": _ema_series(200) if len(close_s) > 200 else [],
+    }
+
+
+def fetch_hourly_bars(sym_u: str) -> Optional[pd.DataFrame]:
+    """Fetch ~60 days of 60-minute bars for one ticker. yfinance's safe limit
+    for interval=60m is 60 days at a time."""
+    try:
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            d = yf.download(sym_u, period="60d", interval="60m",
+                            auto_adjust=True, progress=False, threads=False)
+        if d is None or d.empty:
+            return None
+        if isinstance(d.columns, pd.MultiIndex):
+            d.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in d.columns]
+        else:
+            d.columns = [c.lower() for c in d.columns]
+        return d[["open","high","low","close","volume"]].dropna()
+    except Exception:
+        return None
+
+
+def build_multi_tf_chart_data(sym_u: str, daily_df: pd.DataFrame,
+                               fetch_hourly: bool = True) -> dict:
+    """Build the {default_tf, timeframes:{1H,1D,1W,1M}} payload for LWC."""
+    tfs: dict[str, dict] = {}
+    d = daily_df.tail(1000).copy()
+    tfs["1D"] = serialize_chart_tf(d, daily_format=True)
+    weekly_full = resample_period(daily_df, "W")
+    if not weekly_full.empty:
+        tfs["1W"] = serialize_chart_tf(weekly_full.tail(520), daily_format=True)
+    monthly_full = resample_period(daily_df, "ME")
+    if not monthly_full.empty:
+        tfs["1M"] = serialize_chart_tf(monthly_full.tail(240), daily_format=True)
+    if fetch_hourly:
+        hourly = fetch_hourly_bars(sym_u)
+        if hourly is not None and not hourly.empty:
+            tfs["1H"] = serialize_chart_tf(hourly, daily_format=False)
+    return {"default_tf": "1D", "timeframes": tfs}
+
+
+def build_snapshot_for_symbol(sym_u: str, daily_df: pd.DataFrame,
+                               weekly_df: Optional[pd.DataFrame] = None,
+                               spy_trend: str = "side",
+                               sector_trend: str = "side") -> Snapshot:
+    """Module-level Snapshot builder — used by /chart route. Computes every
+    key-level field (Wave 1, Wave 5, Wave 7-compatible) for a single ticker."""
+    close = daily_df["close"]
+    try:
+        e55  = float(ema(close, 55).iloc[-1])  if len(close) > 55  else None
+        e100 = float(ema(close, 100).iloc[-1]) if len(close) > 100 else None
+        e200 = float(ema(close, 200).iloc[-1]) if len(close) > 200 else None
+        rsi_v = float(rsi(close, 14).iloc[-1]) if len(close) > 14 else None
+        px = float(close.iloc[-1])
+    except Exception:
+        e55 = e100 = e200 = rsi_v = None
+        px = float(close.iloc[-1]) if len(close) else 0.0
+    try:
+        sr = support_resistance(daily_df.tail(750))
+    except Exception:
+        sr = {"support": [], "resistance": []}
+    bid = ask = spread_pct = None
+    try:
+        t = yf.Ticker(sym_u)
+        fi = getattr(t, "fast_info", None) or {}
+        b = fi.get("bid") if isinstance(fi, dict) else getattr(fi, "bid", None)
+        a = fi.get("ask") if isinstance(fi, dict) else getattr(fi, "ask", None)
+        if b and a and a > 0 and b > 0:
+            bid = float(b); ask = float(a)
+            mid = (bid + ask) / 2.0
+            spread_pct = (ask - bid) / mid * 100.0 if mid > 0 else None
+    except Exception:
+        pass
+    avg_vol = None
+    try:
+        if "volume" in daily_df.columns and len(daily_df) >= 21:
+            avg_vol = float(daily_df["volume"].iloc[-21:-1].mean())
+    except Exception:
+        pass
+    try:    fib_data = compute_fib_levels(daily_df, lookback_bars=750)
+    except Exception: fib_data = None
+    try:    pivots_data = compute_pivot_points(daily_df)
+    except Exception: pivots_data = None
+    try:    vwap_val = compute_anchored_vwap(daily_df, lookback_bars=250)
+    except Exception: vwap_val = None
+    round_nums = compute_round_numbers(px, count=3)
+    try:    mtf_piv = compute_multi_timeframe_pivots(daily_df)
+    except Exception: mtf_piv = {}
+    try:    mtf_vp = compute_multi_timeframe_volume_profile(daily_df)
+    except Exception: mtf_vp = {}
+    try:    recent_w = recent_period_extremes(resample_period(daily_df, "W"), count=3).get("periods", [])
+    except Exception: recent_w = []
+    try:    recent_m = recent_period_extremes(resample_period(daily_df, "ME"), count=3).get("periods", [])
+    except Exception: recent_m = []
+    try:    npocs = find_naked_pocs(daily_df, periods=8)
+    except Exception: npocs = []
+    try:    cam = compute_camarilla_pivots(daily_df)
+    except Exception: cam = None
+    return Snapshot(
+        symbol=sym_u, current_price=px,
+        ema_55=e55, ema_100=e100, ema_200=e200, rsi_14=rsi_v,
+        support_levels=sr.get("support", [])[-3:],
+        resistance_levels=sr.get("resistance", [])[-3:],
+        bid=bid, ask=ask, spread_pct=spread_pct, avg_volume=avg_vol,
+        fib=fib_data, pivots=pivots_data,
+        vwap_anchored=vwap_val, round_numbers=round_nums,
+        pivots_weekly=mtf_piv.get("weekly"),
+        pivots_monthly=mtf_piv.get("monthly"),
+        recent_weekly=recent_w, recent_monthly=recent_m,
+        vp_weekly=mtf_vp.get("weekly"),
+        vp_monthly=mtf_vp.get("monthly"),
+        vp_quarterly=mtf_vp.get("quarterly"),
+        naked_pocs=npocs,
+        camarilla=cam,
+        context_flags=build_context(
+            daily_df=daily_df, symbol=sym_u, setup_direction="long",
+            spy_trend=spy_trend, sector_trend=sector_trend,
+            weekly_df=weekly_df,
+        ),
+    )
+
+
 def run_full_scan(
     tickers: list[str],
     always_show: bool = False,
@@ -6129,6 +6266,8 @@ def run_full_scan(
         return {
             "candles": candles,
             "volume":  vols,
+            "ema_8":   _ema_series(8)   if len(close_s) > 8   else [],
+            "ema_21":  _ema_series(21)  if len(close_s) > 21  else [],
             "ema_55":  _ema_series(55)  if len(close_s) > 55  else [],
             "ema_100": _ema_series(100) if len(close_s) > 100 else [],
             "ema_200": _ema_series(200) if len(close_s) > 200 else [],
@@ -6294,6 +6433,10 @@ def run_full_scan(
             npocs = find_naked_pocs(daily_df, periods=8)
         except Exception:
             npocs = []
+        try:
+            cam = compute_camarilla_pivots(daily_df)
+        except Exception:
+            cam = None
         return Snapshot(
             symbol=sym_u,
             current_price=px,
@@ -6311,6 +6454,7 @@ def run_full_scan(
             vp_monthly=mtf_vp.get("monthly"),
             vp_quarterly=mtf_vp.get("quarterly"),
             naked_pocs=npocs,
+            camarilla=cam,
             context_flags=build_context(
                 daily_df=daily_df, symbol=sym_u,
                 setup_direction="long",
@@ -6349,13 +6493,11 @@ def run_full_scan(
         if daily_df is not None and not daily_df.empty:
             snap_levels = _build_snapshot(sym_u, daily_df, weekly_df, etf)
             levels_by_symbol[sym_u] = snap_levels
-            # Serialize chart data for any ticker that will get a chart card
-            # (i.e., has setups OR will be a snapshot card).
-            if setups or always_show:
-                try:
-                    chart_data_by_symbol[sym_u] = _build_chart_data(sym_u, daily_df)
-                except Exception as e:
-                    print(f"    [warn] chart data build failed for {sym_u}: {e}")
+            # Wave 12: do NOT pre-build chart data here. Charts open in their
+            # own tab via /chart?symbol=X — that endpoint fetches the data for
+            # ONE ticker at a time on demand. This keeps the main page memory
+            # footprint tiny (< 200 MB) regardless of how many tickers we scan.
+            # chart_data_by_symbol stays empty.
             # Forming-setup detection runs on every ticker.
             try:
                 watches = find_watches(sym_u, daily_df)
@@ -6419,6 +6561,711 @@ def run_full_scan(
     )
     print(f"✓ Scan complete: {len(all_setups)} setup(s), {len(snapshots)} snapshot(s), {len(all_watches)} watch(es) in {duration:.1f}s\n")
     return all_setups, duration, html
+
+
+def render_single_chart_html(
+    symbol: str,
+    snap: Optional[Snapshot],
+    chart_data: dict,
+    setups: Optional[List[Setup]] = None,
+    watches: Optional[List["WatchItem"]] = None,
+    equity_analysis: Optional[dict] = None,
+    market_regime: Optional[dict] = None,
+) -> str:
+    """Standalone /chart?symbol=X page — full CC experience for one ticker.
+
+    Includes: candles + EMA 8/21/55/100/200, all scanner-drawn levels (Fibs,
+    Pivots D/W/M, Camarilla, POCs, nPOCs, VWAP, round numbers, S/R), view
+    toggle (CC LWC vs TradingView widget), TF selector (1H/1D/1W/1M),
+    annotation tools, countdown badge, key levels panel, context flags,
+    fired setup card (if any), forming watches, Structured Equity Analysis.
+
+    Built memory-light — only ONE ticker's data in memory at a time. Multi-
+    tabbing lets the operator open many charts side-by-side in browser tabs.
+    """
+    import json as _json
+    setups = setups or []
+    watches = watches or []
+    market_regime = market_regime or {}
+    tv_sym = _tv_symbol(symbol)
+
+    # Build price-lines list for THIS ticker — every CC level
+    price_lines: list[dict] = []
+    if snap is not None:
+        # Fired setup entry/stop/targets (if any)
+        for s in setups:
+            price_lines.append({"price": s.entry, "color": "#fbbf24", "lineStyle": 0, "lineWidth": 2, "title": f"Entry ${s.entry:.2f}"})
+            price_lines.append({"price": s.stop_loss, "color": "#ef4444", "lineStyle": 0, "lineWidth": 2, "title": f"Stop ${s.stop_loss:.2f}"})
+            for ti, t in enumerate(s.targets[:2], 1):
+                price_lines.append({"price": t, "color": "#22c55e", "lineStyle": 2, "lineWidth": 2, "title": f"T{ti} ${t:.2f}"})
+        # Swing S/R
+        for sup in (snap.support_levels or [])[-3:]:
+            price_lines.append({"price": sup, "color": "#22c55e88", "lineStyle": 2, "lineWidth": 1, "title": f"S ${sup:.2f}"})
+        for res in (snap.resistance_levels or [])[-3:]:
+            price_lines.append({"price": res, "color": "#ef444488", "lineStyle": 2, "lineWidth": 1, "title": f"R ${res:.2f}"})
+        # Fibonacci ladder + extensions
+        if snap.fib and snap.fib.get("retracements"):
+            for pct, px in snap.fib["retracements"].items():
+                is_cc = pct in ("0.618", "0.660")
+                price_lines.append({"price": float(px),
+                                    "color": "#fbbf24" if is_cc else "#fbbf2488",
+                                    "lineStyle": 2, "lineWidth": 2 if is_cc else 1,
+                                    "title": f"Fib {pct} ${float(px):.2f}"})
+            for pct, px in (snap.fib.get("extensions") or {}).items():
+                price_lines.append({"price": float(px), "color": "#f97316aa",
+                                    "lineStyle": 2, "lineWidth": 1,
+                                    "title": f"Fib ext {pct} ${float(px):.2f}"})
+        # DAILY pivots
+        if snap.pivots:
+            p = snap.pivots
+            price_lines.append({"price": p["pp"], "color": "#fde047", "lineStyle": 2, "lineWidth": 1, "title": f"DAILY PP ${p['pp']:.2f}"})
+            for key, label in [("r1","R1"),("r2","R2"),("s1","S1"),("s2","S2")]:
+                if key in p:
+                    price_lines.append({"price": p[key], "color": "#fde04788", "lineStyle": 2, "lineWidth": 1, "title": f"DAILY {label} ${p[key]:.2f}"})
+        # WEEKLY pivots
+        if snap.pivots_weekly:
+            p = snap.pivots_weekly
+            price_lines.append({"price": p["pp"], "color": "#ec4899", "lineStyle": 2, "lineWidth": 2, "title": f"WEEKLY PP ${p['pp']:.2f}"})
+            for key, label in [("r1","R1"),("r2","R2"),("s1","S1"),("s2","S2")]:
+                if key in p:
+                    price_lines.append({"price": p[key], "color": "#ec489988", "lineStyle": 2, "lineWidth": 1, "title": f"WEEKLY {label} ${p[key]:.2f}"})
+        # MONTHLY pivots
+        if snap.pivots_monthly:
+            p = snap.pivots_monthly
+            price_lines.append({"price": p["pp"], "color": "#a855f7", "lineStyle": 2, "lineWidth": 2, "title": f"MONTHLY PP ${p['pp']:.2f}"})
+            for key, label in [("r1","R1"),("s1","S1")]:
+                if key in p:
+                    price_lines.append({"price": p[key], "color": "#a855f7aa", "lineStyle": 2, "lineWidth": 1, "title": f"MONTHLY {label} ${p[key]:.2f}"})
+        # Recent weekly + monthly highs/lows
+        for w in (snap.recent_weekly or [])[-3:]:
+            price_lines.append({"price": w["high"], "color": "#ec4899aa", "lineStyle": 2, "lineWidth": 1, "title": f"WEEKLY high ${w['high']:.2f}"})
+            price_lines.append({"price": w["low"],  "color": "#ec4899aa", "lineStyle": 2, "lineWidth": 1, "title": f"WEEKLY low ${w['low']:.2f}"})
+        for m in (snap.recent_monthly or [])[-3:]:
+            price_lines.append({"price": m["high"], "color": "#a855f7aa", "lineStyle": 2, "lineWidth": 1, "title": f"MONTHLY high ${m['high']:.2f}"})
+            price_lines.append({"price": m["low"],  "color": "#a855f7aa", "lineStyle": 2, "lineWidth": 1, "title": f"MONTHLY low ${m['low']:.2f}"})
+        # Multi-TF Volume Profile
+        if snap.vp_weekly and "poc" in snap.vp_weekly:
+            vp = snap.vp_weekly
+            price_lines.append({"price": vp["poc"], "color": "#f97316", "lineStyle": 0, "lineWidth": 2, "title": f"WEEKLY POC ${vp['poc']:.2f}"})
+            if "vah" in vp: price_lines.append({"price": vp["vah"], "color": "#f97316aa", "lineStyle": 2, "lineWidth": 1, "title": f"WEEKLY VAH ${vp['vah']:.2f}"})
+            if "val" in vp: price_lines.append({"price": vp["val"], "color": "#f97316aa", "lineStyle": 2, "lineWidth": 1, "title": f"WEEKLY VAL ${vp['val']:.2f}"})
+        if snap.vp_monthly and "poc" in snap.vp_monthly:
+            vp = snap.vp_monthly
+            price_lines.append({"price": vp["poc"], "color": "#dc2626", "lineStyle": 0, "lineWidth": 2, "title": f"MONTHLY POC ${vp['poc']:.2f}"})
+            if "vah" in vp: price_lines.append({"price": vp["vah"], "color": "#dc2626aa", "lineStyle": 2, "lineWidth": 1, "title": f"MONTHLY VAH ${vp['vah']:.2f}"})
+            if "val" in vp: price_lines.append({"price": vp["val"], "color": "#dc2626aa", "lineStyle": 2, "lineWidth": 1, "title": f"MONTHLY VAL ${vp['val']:.2f}"})
+        # Naked POCs
+        for n in (snap.naked_pocs or [])[:6]:
+            price_lines.append({"price": float(n["poc"]), "color": "#06b6d4", "lineStyle": 2, "lineWidth": 1, "title": f"nPOC ${float(n['poc']):.2f}"})
+        # Camarilla pivots
+        if snap.camarilla:
+            for key, label in [("h4","H4"),("h3","H3"),("h2","H2"),("h1","H1"),
+                               ("l1","L1"),("l2","L2"),("l3","L3"),("l4","L4")]:
+                if key in snap.camarilla:
+                    price_lines.append({"price": float(snap.camarilla[key]), "color": "#14b8a688",
+                                        "lineStyle": 2, "lineWidth": 1,
+                                        "title": f"CAM {label} ${float(snap.camarilla[key]):.2f}"})
+        # Anchored VWAP
+        if snap.vwap_anchored is not None:
+            price_lines.append({"price": float(snap.vwap_anchored), "color": "#3b82f6",
+                                "lineStyle": 0, "lineWidth": 2,
+                                "title": f"VWAP ${float(snap.vwap_anchored):.2f}"})
+        # Round numbers
+        for rn in (snap.round_numbers or [])[:6]:
+            price_lines.append({"price": float(rn), "color": "#94a3b822",
+                                "lineStyle": 2, "lineWidth": 1, "title": f"${float(rn):.0f}"})
+
+    # Side-panel content
+    px = snap.current_price if snap else 0.0
+    bid_str = f"${snap.bid:.2f}" if (snap and snap.bid is not None) else "—"
+    ask_str = f"${snap.ask:.2f}" if (snap and snap.ask is not None) else "—"
+    spread_str = f"{snap.spread_pct:.2f}%" if (snap and snap.spread_pct is not None) else "—"
+    avg_vol_str = "—"
+    if snap and snap.avg_volume:
+        v = snap.avg_volume
+        avg_vol_str = (f"{v/1_000_000:.1f}M" if v >= 1_000_000
+                       else (f"{v/1_000:.0f}K" if v >= 1_000 else f"{v:.0f}"))
+    bar_pat = "—"
+    rsi_html = "—"
+    if snap and snap.rsi_14 is not None:
+        rc = "#ef4444" if snap.rsi_14 > 70 else ("#22c55e" if snap.rsi_14 < 30 else "#94a3b8")
+        rsi_html = f'<span style="color:{rc}">{snap.rsi_14:.1f}</span>'
+
+    key_levels_panel = _render_key_levels_panel(snap)
+    equity_panel = _render_equity_panel(equity_analysis) if equity_analysis else ""
+    flags_panel = _render_flags(snap.context_flags) if (snap and snap.context_flags) else ""
+
+    setup_panel = ""
+    if setups:
+        s = setups[0]
+        long_dir = s.direction == "long"
+        tone = "#22c55e" if long_dir else "#ef4444"
+        arrow = "▲" if long_dir else "▼"
+        ai_block = _ai_voice_block(getattr(s, "ai_analysis", "") or "")
+        setup_panel = f"""
+        <div class="setup-card">
+          <div class="setup-head" style="color:{tone}">
+            {arrow} {s.name} <span class="conv">{int(s.conviction*100)}%</span>
+          </div>
+          <div class="setup-grid">
+            <div><span class="lbl">Entry</span><span class="val">${s.entry:.2f}</span></div>
+            <div><span class="lbl">Stop</span><span class="val" style="color:#ef4444">${s.stop_loss:.2f}</span></div>
+            <div><span class="lbl">Target 1</span><span class="val" style="color:#22c55e">${s.targets[0]:.2f}</span></div>
+            <div><span class="lbl">Target 2</span><span class="val" style="color:#22c55e">${s.targets[1] if len(s.targets)>1 else s.targets[0]:.2f}</span></div>
+            <div><span class="lbl">R:R</span><span class="val">{s.risk_reward:.2f}R</span></div>
+            <div><span class="lbl">Move</span><span class="val">{s.move_pct:+.1f}%</span></div>
+          </div>
+          <div class="rationale">{s.reasoning}</div>
+          <div class="cite">📖 {s.citation}</div>
+          {ai_block}
+          <div class="setup-actions">
+            <button onclick="sizeTrade('{symbol}', {s.entry:.4f}, {s.stop_loss:.4f})">📐 Size this</button>
+            <button class="take-btn" onclick="takeTrade('{symbol}', '{s.name}', '{s.direction}', {s.entry:.4f}, {s.stop_loss:.4f}, {s.targets[0] if s.targets else 0:.4f}, {s.targets[1] if len(s.targets)>1 else 0:.4f})">▶ Take</button>
+          </div>
+        </div>
+        """
+
+    watch_panel = ""
+    if watches:
+        items = ""
+        for w in watches[:4]:
+            dir_col = "#22c55e" if w.direction == "long" else "#ef4444"
+            sign = "+" if w.distance_pct > 0 else ""
+            items += (f'<div class="watch-row" style="border-left:3px solid {dir_col}">'
+                      f'<div class="watch-head"><span style="color:{dir_col}">{w.signal}</span>'
+                      f'<span class="watch-dist">{sign}{w.distance_pct:.1f}% · ~{w.bars_estimate}d</span></div>'
+                      f'<div class="watch-detail">Waiting for: {w.waiting_for}</div>'
+                      f'<div class="cite">📖 {w.citation}</div></div>')
+        watch_panel = f'<h3 class="side-h">👁 Watching</h3>{items}'
+
+    chart_data_json = _json.dumps({symbol: chart_data}, default=float)
+    price_lines_json = _json.dumps(price_lines)
+
+    vix_lvl = market_regime.get("vix_level")
+    vix_lvl_str = f"{vix_lvl:.1f}" if vix_lvl is not None else "—"
+    vix_regime = market_regime.get("vix_regime", "unknown")
+
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8">
+<title>{symbol} · CC Chart</title>
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+<script src="https://s3.tradingview.com/tv.js"></script>
+<style>
+  * {{ box-sizing: border-box; }}
+  body {{ font-family: -apple-system, system-ui, sans-serif; background:#0a0f1c; color:#e2e8f0; margin:0; padding:14px; }}
+  h1 {{ margin:0 0 4px 0; font-size:22px; }}
+  h3 {{ margin:14px 0 6px 0; font-size:13px; color:#fbbf24; text-transform:uppercase; letter-spacing:1px; }}
+  .layout {{ display:grid; grid-template-columns: minmax(0, 1fr) 380px; gap:14px; }}
+  @media (max-width: 1100px) {{ .layout {{ grid-template-columns: 1fr; }} }}
+  .chart-host {{ background:#0a0f1c; border-radius:8px; padding:8px; }}
+  .chart-toolbar {{ display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:6px; flex-wrap:wrap; }}
+  .view-toggle {{ display:flex; gap:0; background:#0f172a; border-radius:6px; padding:2px; }}
+  .view-btn {{ padding:6px 14px; border:0; background:transparent; color:#94a3b8; border-radius:4px; font-size:11px; cursor:pointer; font-weight:600; font-family:ui-monospace,monospace; }}
+  .view-btn:hover {{ background:#1e293b; color:#e2e8f0; }}
+  .view-btn.active {{ background:#22c55e; color:#000; }}
+  .chart-extras {{ display:flex; gap:6px; align-items:center; flex-wrap:wrap; }}
+  .anno-btn {{ padding:5px 10px; background:#0a0f1c; color:#94a3b8; border:1px solid #1e293b; border-radius:4px; font-size:11px; cursor:pointer; font-family:ui-monospace,monospace; }}
+  .anno-btn:hover {{ background:#1e293b; color:#fbbf24; border-color:#fbbf24; }}
+  .countdown-badge {{ padding:4px 10px; background:#1e1b4b; color:#a78bfa; border-radius:4px; font-size:11px; font-family:ui-monospace,monospace; font-weight:600; }}
+  .tv-widget-host {{ height:680px; width:100%; }}
+  .tv-widget-host > div {{ height:680px !important; width:100% !important; }}
+  .tv-widget-host iframe {{ height:680px !important; width:100% !important; border:0 !important; border-radius:6px; }}
+  .lwc-wrap {{ background:#0a0f1c; border-radius:8px; padding:8px; position:relative; }}
+  .tf-bar {{ display:flex; gap:4px; margin-bottom:6px; padding:4px; background:#0f172a; border-radius:6px; }}
+  .tf-btn {{ padding:5px 12px; border:1px solid #1e293b; background:#0a0f1c; color:#94a3b8; border-radius:4px; font-size:11px; font-family:ui-monospace,monospace; cursor:pointer; font-weight:600; }}
+  .tf-btn:hover:not(:disabled) {{ background:#1e293b; color:#e2e8f0; }}
+  .tf-btn.active {{ background:#22c55e; color:#000; border-color:#22c55e; }}
+  .tf-btn.tf-unavailable {{ opacity:0.35; cursor:not-allowed; }}
+  .lwc-chart {{ height:680px; width:100%; }}
+  .lwc-fallback {{ height:680px; display:flex; align-items:center; justify-content:center; color:#64748b; font-size:13px; }}
+  .lwc-legend {{ position:absolute; left:14px; top:60px; background:rgba(15,23,42,0.78); border:1px solid #1e293b; border-radius:6px; padding:6px 10px; font-size:11px; font-family:ui-monospace,monospace; color:#94a3b8; pointer-events:none; line-height:1.6; }}
+  .lwc-legend .lg-row {{ display:flex; gap:8px; align-items:center; }}
+  .lwc-legend .lg-dot {{ width:8px; height:2px; border-radius:1px; display:inline-block; }}
+  .lwc-legend .lg-px {{ color:#fbbf24; font-weight:700; }}
+  .side-panel {{ display:flex; flex-direction:column; gap:8px; }}
+  .side-h {{ margin:8px 0 4px 0; font-size:12px; color:#fbbf24; text-transform:uppercase; letter-spacing:1px; }}
+  .header-row {{ display:flex; justify-content:space-between; align-items:baseline; padding:10px 14px; background:#0f172a; border-radius:8px; }}
+  .price-big {{ font-size:28px; font-weight:700; color:#fbbf24; font-family:ui-monospace,monospace; }}
+  .ticker-meta {{ font-size:11px; color:#94a3b8; }}
+  .info-bar {{ display:flex; gap:14px; padding:8px 14px; background:#0f172a; border-radius:8px; font-size:11px; flex-wrap:wrap; }}
+  .info-bar span b {{ color:#fbbf24; }}
+  .key-levels {{ margin-top:0; padding:10px; background:#0a0f1c; border:1px dashed #1e293b; border-radius:6px; }}
+  .kl-head {{ font-size:10px; text-transform:uppercase; letter-spacing:1px; color:#fbbf24; margin-bottom:8px; font-weight:600; }}
+  .setup-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:4px 16px; font-size:12px; }}
+  .setup-grid div {{ display:flex; justify-content:space-between; }}
+  .lbl {{ color:#64748b; }}
+  .val {{ font-family:ui-monospace,monospace; }}
+  .lvl-dist {{ font-size:10px; color:#64748b; }}
+  .flags {{ display:flex; flex-direction:column; gap:4px; padding:6px 0; }}
+  .flag {{ display:flex; justify-content:space-between; padding:4px 8px; background:#0a0f1c; border-radius:4px; font-size:11px; }}
+  .flag-l {{ font-weight:600; }}
+  .flag-d {{ color:#94a3b8; font-size:10px; }}
+  .setup-card {{ background:#0a0f1c; border:1px solid #1e293b; border-radius:8px; padding:12px; }}
+  .setup-head {{ font-weight:600; font-size:13px; display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }}
+  .conv {{ background:#22c55e; color:#000; padding:2px 6px; border-radius:4px; font-size:11px; font-family:ui-monospace,monospace; }}
+  .rationale {{ font-size:11px; color:#94a3b8; margin-top:8px; }}
+  .cite {{ font-size:10px; color:#64748b; margin-top:6px; }}
+  .ai-voice {{ margin-top:10px; padding:10px; background:linear-gradient(135deg,#1e293b 0%,#0f1729 100%); border-left:3px solid #22c55e; border-radius:6px; font-size:12px; line-height:1.5; }}
+  .ai-head {{ font-size:10px; text-transform:uppercase; letter-spacing:1px; color:#22c55e; margin-bottom:6px; font-weight:600; }}
+  .ai-offline {{ border-left-color:#94a3b8 !important; opacity:0.8; }}
+  .ai-offline code {{ background:#1e293b; padding:1px 4px; border-radius:3px; color:#fbbf24; font-size:11px; }}
+  .setup-actions {{ display:flex; gap:6px; margin-top:10px; padding-top:8px; border-top:1px solid #1e293b; }}
+  .setup-actions button {{ flex:1; padding:5px 8px; border-radius:4px; border:1px solid #1e293b; background:#0a0f1c; color:#94a3b8; cursor:pointer; font-size:11px; }}
+  .setup-actions .take-btn {{ border-color:#22c55e; color:#22c55e; }}
+  .setup-actions .take-btn:hover {{ background:#22c55e; color:#000; }}
+  .watch-row {{ background:#0a0f1c; padding:8px 10px; border-radius:4px; margin-bottom:6px; font-size:11px; }}
+  .watch-head {{ display:flex; justify-content:space-between; font-weight:600; }}
+  .watch-dist {{ color:#fbbf24; font-family:ui-monospace,monospace; }}
+  .watch-detail {{ color:#94a3b8; margin-top:3px; }}
+  .equity-panel {{ padding:12px; background:linear-gradient(135deg,#0f172a 0%,#1e1b4b 100%); border:1px solid #312e81; border-left:4px solid #a78bfa; border-radius:8px; font-size:11px; }}
+  .eq-head {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }}
+  .eq-title {{ font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#a78bfa; font-weight:700; }}
+  .eq-band {{ padding:3px 10px; border-radius:4px; font-size:10px; font-weight:700; font-family:ui-monospace,monospace; }}
+  .eq-snap {{ color:#cbd5e1; margin-bottom:8px; line-height:1.4; }}
+  .eq-grid {{ display:grid; gap:3px; margin-bottom:8px; }}
+  .eq-row {{ display:flex; justify-content:space-between; align-items:center; padding:3px 0; border-bottom:1px solid #1e293b; }}
+  .eq-label {{ color:#94a3b8; }}
+  .eq-score {{ display:flex; align-items:center; gap:8px; }}
+  .eq-val {{ font-family:ui-monospace,monospace; font-weight:700; min-width:30px; text-align:right; }}
+  .eq-stance {{ margin-top:6px; color:#cbd5e1; }}
+  .eq-thesis {{ margin-top:6px; font-size:10px; color:#94a3b8; line-height:1.4; }}
+  .eq-thesis div {{ margin-top:2px; }}
+  .eq-inval {{ margin-top:8px; padding-top:8px; border-top:1px solid #1e293b; color:#fbbf24; font-size:10px; }}
+  .eq-inval ul {{ margin:4px 0 0 0; padding-left:18px; color:#94a3b8; }}
+  .back-link {{ color:#94a3b8; text-decoration:none; font-size:12px; margin-bottom:8px; display:inline-block; }}
+  .back-link:hover {{ color:#22c55e; }}
+  .action-bar {{ display:flex; gap:6px; margin-top:10px; flex-wrap:wrap; }}
+  .action-bar button, .action-bar a {{ padding:6px 12px; background:#0a0f1c; color:#94a3b8; border:1px solid #1e293b; border-radius:4px; font-size:11px; cursor:pointer; text-decoration:none; font-family:ui-monospace,monospace; display:inline-flex; align-items:center; gap:4px; }}
+  .action-bar button:hover, .action-bar a:hover {{ background:#1e293b; color:#fbbf24; border-color:#fbbf24; }}
+  .alarm-toast {{ position:fixed; bottom:24px; right:24px; max-width:380px; background:linear-gradient(135deg,#16a34a,#22c55e); color:#000; padding:14px 18px; border-radius:10px; font-weight:600; box-shadow:0 10px 30px rgba(0,0,0,0.6); z-index:9999; }}
+</style></head>
+<body>
+  <a href="/" class="back-link">← Back to scanner</a>
+  <div class="layout">
+    <div>
+      <div class="header-row">
+        <div>
+          <h1>{symbol}</h1>
+          <div class="ticker-meta">Bid {bid_str} · Ask {ask_str} · Spread {spread_str} · Avg vol(20d) {avg_vol_str}</div>
+        </div>
+        <div class="price-big">${px:.2f}</div>
+      </div>
+      <div class="info-bar">
+        <span>RSI 14: <b>{rsi_html.replace('<span', '').replace('</span>', '').replace('style="color:', '').split('"')[0] if False else ''}</b></span>
+        <span>RSI: {rsi_html}</span>
+        <span>VIX: <b>{vix_lvl_str} · {vix_regime}</b></span>
+      </div>
+
+      <div class="chart-host" data-symbol="{symbol}" data-chart-idx="chart_solo">
+        <div class="chart-toolbar">
+          <div class="view-toggle">
+            <button class="view-btn active" data-view="cc" data-target="chart_solo">📊 CC View</button>
+            <button class="view-btn" data-view="tv" data-target="chart_solo">📈 TradingView</button>
+          </div>
+          <div class="chart-extras">
+            <span class="countdown-badge" id="cd_chart_solo">⏱ —</span>
+            <button class="anno-btn" onclick="addAnnotation('{symbol}','chart_solo','note')">✏ Note</button>
+            <button class="anno-btn" onclick="addAnnotation('{symbol}','chart_solo','line')">+ Line</button>
+            <button class="anno-btn" onclick="clearAnnotations('{symbol}','chart_solo')">⌫ Clear my drawings</button>
+          </div>
+        </div>
+        <div class="view-cc" data-view-id="chart_solo">
+          <div class="lwc-wrap">
+            <div class="tf-bar">
+              <button class="tf-btn" data-tf="1H">1H</button>
+              <button class="tf-btn" data-tf="1D">1D</button>
+              <button class="tf-btn" data-tf="1W">1W</button>
+              <button class="tf-btn" data-tf="1M">1M</button>
+            </div>
+            <div class="lwc-chart" id="lwc_chart_solo" data-symbol="{symbol}" data-lines='{price_lines_json}'></div>
+            <div class="lwc-legend" id="lg_chart_solo"></div>
+          </div>
+        </div>
+        <div class="view-tv" data-view-id="chart_solo" data-tv-symbol="{tv_sym}" style="display:none">
+          <div class="tv-widget-host" id="tv_host_chart_solo"></div>
+        </div>
+      </div>
+
+      <div class="action-bar">
+        <button onclick="toggleStarSolo('{symbol}')" id="star-solo-btn">⭐ Toggle Watchlist</button>
+        <button onclick="setAlarmSolo('{symbol}', {px:.2f})">🔔 Set price alarm</button>
+        <button onclick="openManualSetupSolo('{symbol}', {px:.2f})">✎ Add manual setup</button>
+        <a href="https://www.tradingview.com/chart/?symbol={tv_sym}" target="_blank">🔗 Open in TradingView.com</a>
+      </div>
+    </div>
+
+    <div class="side-panel">
+      <h3 class="side-h">📐 Key Levels (with distance from current)</h3>
+      {key_levels_panel}
+      {('<h3 class="side-h">🚦 Context Flags</h3>' + '<div class="setup-card">' + flags_panel + '</div>') if flags_panel else ''}
+      {('<h3 class="side-h">🎯 Fired Setup</h3>' + setup_panel) if setup_panel else ''}
+      {watch_panel}
+      {('<h3 class="side-h">📊 Structured Equity Analysis</h3>' + equity_panel) if equity_panel else ''}
+    </div>
+  </div>
+
+  <script>
+    window.cc_charts_data = {chart_data_json};
+    window.cc_chart_handles = window.cc_chart_handles || {{}};
+    window.cc_tv_loaded = window.cc_tv_loaded || {{}};
+
+    function _getTfData(rawSymData, tf) {{
+      if (rawSymData && rawSymData.timeframes) return rawSymData.timeframes[tf] || rawSymData.timeframes[rawSymData.default_tf] || null;
+      if (rawSymData && rawSymData.candles) return rawSymData;
+      return null;
+    }}
+    function _availableTfs(rawSymData) {{
+      if (rawSymData && rawSymData.timeframes) return Object.keys(rawSymData.timeframes);
+      return rawSymData && rawSymData.candles ? ["1D"] : [];
+    }}
+
+    function getStars() {{ try {{ return JSON.parse(localStorage.getItem('cc_stars') || '[]'); }} catch(_) {{ return []; }} }}
+    function saveStars(v) {{ localStorage.setItem('cc_stars', JSON.stringify(v)); }}
+    function getAlarms() {{ try {{ return JSON.parse(localStorage.getItem('cc_alarms') || '[]'); }} catch(_) {{ return []; }} }}
+    function saveAlarms(v) {{ localStorage.setItem('cc_alarms', JSON.stringify(v)); }}
+
+    function getAnnotations(sym) {{
+      try {{ return (JSON.parse(localStorage.getItem('cc_annotations') || '{{}}'))[sym] || []; }}
+      catch(_) {{ return []; }}
+    }}
+    function saveAnnotations(sym, arr) {{
+      var all;
+      try {{ all = JSON.parse(localStorage.getItem('cc_annotations') || '{{}}'); }} catch(_) {{ all = {{}}; }}
+      all[sym] = arr;
+      localStorage.setItem('cc_annotations', JSON.stringify(all));
+    }}
+    function showToast(msg) {{
+      var t = document.createElement('div');
+      t.className = 'alarm-toast'; t.textContent = msg;
+      document.body.appendChild(t);
+      setTimeout(function() {{ t.remove(); }}, 4500);
+    }}
+
+    function addAnnotation(sym, chartId, kind) {{
+      var priceStr = prompt(kind === 'note' ? 'Note — price level:' : 'Line — price level:');
+      if (!priceStr) return;
+      var price = parseFloat(priceStr);
+      if (isNaN(price)) return alert('Invalid price');
+      var text = kind === 'note' ? (prompt('Note text (optional):') || '') : '';
+      var color = kind === 'note' ? '#fbbf24' : '#22d3ee';
+      var arr = getAnnotations(sym);
+      arr.push({{id: Date.now(), kind: kind, price: price, text: text, color: color}});
+      saveAnnotations(sym, arr);
+      applyAnnotations(sym, chartId);
+      showToast('✏ Added ' + (kind === 'note' ? 'note' : 'line') + ' at $' + price.toFixed(2));
+    }}
+    function clearAnnotations(sym, chartId) {{
+      if (!confirm('Remove ALL your drawings for ' + sym + '?')) return;
+      saveAnnotations(sym, []);
+      applyAnnotations(sym, chartId);
+    }}
+    function applyAnnotations(sym, chartId) {{
+      var h = window.cc_chart_handles['lwc_' + chartId];
+      if (!h) return;
+      if (h.userLineHandles) {{
+        h.userLineHandles.forEach(function(pl) {{ try {{ h.candleSeries.removePriceLine(pl); }} catch(_) {{}} }});
+      }}
+      var annos = getAnnotations(sym);
+      h.userLineHandles = annos.map(function(a) {{
+        return h.candleSeries.createPriceLine({{
+          price: a.price, color: a.color || '#fbbf24', lineWidth: 2,
+          lineStyle: LightweightCharts.LineStyle.Solid,
+          axisLabelVisible: true,
+          title: '👤 ' + (a.text ? a.text + ' · ' : '') + '$' + a.price.toFixed(2),
+        }});
+      }});
+    }}
+
+    function toggleStarSolo(sym) {{
+      var stars = getStars();
+      var i = stars.indexOf(sym);
+      if (i >= 0) {{ stars.splice(i, 1); showToast('☆ Removed ' + sym + ' from watchlist'); }}
+      else {{ stars.push(sym); showToast('⭐ Added ' + sym + ' to watchlist'); }}
+      saveStars(stars);
+      var btn = document.getElementById('star-solo-btn');
+      if (btn) btn.textContent = (stars.indexOf(sym) >= 0 ? '⭐' : '☆') + ' Toggle Watchlist';
+    }}
+    function setAlarmSolo(sym, currentPrice) {{
+      var target = prompt('Alert when ' + sym + ' crosses price:\\n(current: $' + currentPrice + ')', currentPrice.toFixed(2));
+      if (!target) return;
+      var level = parseFloat(target);
+      if (isNaN(level)) return alert('Invalid');
+      var alarms = getAlarms();
+      var dir = level > currentPrice ? 'above' : 'below';
+      alarms.push({{symbol: sym, level: level, direction: dir, set_at: Date.now(), set_price: currentPrice}});
+      saveAlarms(alarms);
+      if (Notification.permission !== 'granted') Notification.requestPermission();
+      showToast('🔔 Alarm set: ' + sym + ' ' + dir + ' $' + level.toFixed(2));
+    }}
+    function openManualSetupSolo(sym, price) {{
+      var entry = prompt('Entry price (current ' + price + '):', price);
+      if (!entry) return;
+      var stop = prompt('Stop price:');
+      if (!stop) return;
+      var t1 = prompt('Target 1 price:');
+      if (!t1) return;
+      var t2raw = prompt('Target 2 price (optional):');
+      var dir = parseFloat(stop) < parseFloat(entry) ? 'long' : 'short';
+      var setups;
+      try {{ setups = JSON.parse(localStorage.getItem('cc_manual_setups') || '[]'); }} catch(_) {{ setups = []; }}
+      setups.unshift({{
+        id: Date.now(), created: new Date().toISOString(),
+        symbol: sym, name: 'Manual setup', direction: dir,
+        entry: parseFloat(entry), stop: parseFloat(stop),
+        t1: parseFloat(t1), t2: t2raw ? parseFloat(t2raw) : null,
+        notes: '',
+      }});
+      localStorage.setItem('cc_manual_setups', JSON.stringify(setups));
+      var stars = getStars();
+      if (stars.indexOf(sym) < 0) {{ stars.push(sym); saveStars(stars); }}
+      showToast('💾 Manual setup saved + added to watchlist');
+    }}
+    function sizeTrade(sym, entry, stop) {{
+      var acctRaw = prompt('Account $:', '10000');
+      var pctRaw = prompt('Risk %:', '0.5');
+      var acct = parseFloat(acctRaw) || 0;
+      var pct = parseFloat(pctRaw) || 0;
+      var riskDollars = acct * (pct / 100.0);
+      var perShare = Math.abs(entry - stop);
+      var shares = perShare > 0 ? Math.floor(riskDollars / perShare) : 0;
+      var notional = shares * entry;
+      alert(sym + ' sizing:\\n\\nAccount: $' + acct.toFixed(2)
+        + '\\nRisk: $' + riskDollars.toFixed(2)
+        + '\\nShares: ' + shares
+        + '\\nNotional: $' + notional.toFixed(2));
+    }}
+    function takeTrade(sym, name, dir, entry, stop, t1, t2) {{
+      var j;
+      try {{ j = JSON.parse(localStorage.getItem('cc_journal') || '[]'); }} catch(_) {{ j = []; }}
+      j.unshift({{
+        id: Date.now(), date: new Date().toISOString().slice(0,10),
+        symbol: sym, name: name, direction: dir,
+        entry: entry, stop: stop, t1: t1, t2: t2,
+        shares: 0, risk_dollars: 0,
+        status: 'open', exit: null, r_outcome: null, notes: '',
+      }});
+      localStorage.setItem('cc_journal', JSON.stringify(j));
+      showToast('▶ Trade logged: ' + sym + ' ' + dir);
+    }}
+
+    function loadTradingViewWidget(targetId, symbol) {{
+      if (window.cc_tv_loaded[targetId]) return;
+      var hostEl = document.getElementById('tv_host_' + targetId);
+      if (!hostEl) return;
+      if (typeof TradingView === 'undefined') {{
+        hostEl.innerHTML = '<div style="padding:30px;color:#64748b">TradingView library not loaded.</div>';
+        return;
+      }}
+      hostEl.innerHTML = '<div id="tv_inner_' + targetId + '"></div>';
+      try {{
+        new TradingView.widget({{
+          container_id: 'tv_inner_' + targetId,
+          autosize: true, symbol: symbol, interval: 'D',
+          timezone: 'America/New_York', theme: 'dark',
+          style: '1', locale: 'en', toolbar_bg: '#0a0f1c',
+          enable_publishing: false, hide_top_toolbar: false,
+          hide_legend: false, save_image: false,
+          allow_symbol_change: false, withdateranges: true,
+          studies: ['MAExp@tv-basicstudies', 'MAExp@tv-basicstudies', 'MAExp@tv-basicstudies',
+                    'RSI@tv-basicstudies', 'Volume@tv-basicstudies'],
+        }});
+        window.cc_tv_loaded[targetId] = true;
+      }} catch(e) {{
+        hostEl.innerHTML = '<div style="padding:30px;color:#ef4444">TV widget error: ' + e.message + '</div>';
+      }}
+    }}
+
+    function initChart() {{
+      if (typeof LightweightCharts === 'undefined') return;
+      var div = document.getElementById('lwc_chart_solo');
+      if (!div) return;
+      var sym = div.getAttribute('data-symbol');
+      var rawData = window.cc_charts_data[sym];
+      var avail = _availableTfs(rawData);
+      if (!avail.length) {{
+        div.innerHTML = '<div class="lwc-fallback">No chart data for ' + sym + '</div>';
+        return;
+      }}
+      var defaultTf = (rawData.default_tf && avail.indexOf(rawData.default_tf) >= 0) ? rawData.default_tf : avail[0];
+      var initial = _getTfData(rawData, defaultTf);
+
+      var chart = LightweightCharts.createChart(div, {{
+        layout: {{ background: {{ type: 'solid', color: '#0a0f1c' }}, textColor: '#94a3b8' }},
+        grid: {{ vertLines: {{ color: '#1e293b' }}, horzLines: {{ color: '#1e293b' }} }},
+        rightPriceScale: {{ borderColor: '#1e293b' }},
+        timeScale: {{ borderColor: '#1e293b', timeVisible: (defaultTf === '1H') }},
+        crosshair: {{ mode: 1 }}, autoSize: true,
+      }});
+      var candleSeries = chart.addCandlestickSeries({{
+        upColor:'#22c55e', downColor:'#ef4444',
+        borderUpColor:'#22c55e', borderDownColor:'#ef4444',
+        wickUpColor:'#22c55e', wickDownColor:'#ef4444',
+      }});
+      candleSeries.setData(initial.candles);
+      var volSeries = chart.addHistogramSeries({{
+        priceFormat: {{ type:'volume' }}, priceScaleId: '', color:'#22c55e55',
+      }});
+      volSeries.priceScale().applyOptions({{ scaleMargins: {{ top:0.85, bottom:0 }} }});
+      if (initial.volume && initial.volume.length) volSeries.setData(initial.volume);
+
+      var emaSeries = {{}};
+      function addEMA(key, series, color, title) {{
+        if (!series || !series.length) {{ emaSeries[key] = null; return; }}
+        var s = chart.addLineSeries({{ color: color, lineWidth: 1, title: title, lastValueVisible: false, priceLineVisible: false }});
+        s.setData(series); emaSeries[key] = s;
+      }}
+      addEMA('ema_8',   initial.ema_8,   '#fbbf24', 'EMA 8');
+      addEMA('ema_21',  initial.ema_21,  '#f59e0b', 'EMA 21');
+      addEMA('ema_55',  initial.ema_55,  '#94a3b8', 'EMA 55');
+      addEMA('ema_100', initial.ema_100, '#cbd5e1', 'EMA 100');
+      addEMA('ema_200', initial.ema_200, '#64748b', 'EMA 200');
+
+      var rawLines = div.getAttribute('data-lines') || '[]';
+      var lines;
+      try {{ lines = JSON.parse(rawLines); }} catch(_) {{ lines = []; }}
+      lines.forEach(function(l) {{
+        candleSeries.createPriceLine({{
+          price: l.price, color: l.color, lineWidth: l.lineWidth || 2,
+          lineStyle: l.lineStyle === 2 ? LightweightCharts.LineStyle.Dashed : LightweightCharts.LineStyle.Solid,
+          axisLabelVisible: true, title: l.title || '',
+        }});
+      }});
+      var legend = document.getElementById('lg_chart_solo');
+      if (legend) {{
+        legend.innerHTML =
+          '<div class="lg-row"><span class="lg-dot" style="background:#22c55e"></span> Bull candle</div>'
+        + '<div class="lg-row"><span class="lg-dot" style="background:#fbbf24"></span> EMA 8</div>'
+        + '<div class="lg-row"><span class="lg-dot" style="background:#f59e0b"></span> EMA 21</div>'
+        + '<div class="lg-row"><span class="lg-dot" style="background:#94a3b8"></span> EMA 55</div>'
+        + '<div class="lg-row"><span class="lg-dot" style="background:#cbd5e1"></span> EMA 100</div>'
+        + '<div class="lg-row"><span class="lg-dot" style="background:#64748b"></span> EMA 200</div>'
+        + '<div class="lg-row"><span class="lg-px">' + sym + '</span></div>';
+      }}
+      chart.timeScale().fitContent();
+      new ResizeObserver(function() {{ chart.applyOptions({{ width: div.clientWidth, height: div.clientHeight }}); }}).observe(div);
+
+      window.cc_chart_handles['lwc_chart_solo'] = {{
+        chart: chart, candleSeries: candleSeries, volSeries: volSeries,
+        emaSeries: emaSeries, currentTf: defaultTf, rawData: rawData,
+      }};
+
+      // Wire TF buttons
+      document.querySelectorAll('.tf-btn').forEach(function(btn) {{
+        var tf = btn.getAttribute('data-tf');
+        if (avail.indexOf(tf) < 0) {{
+          btn.classList.add('tf-unavailable');
+          btn.title = tf + ' not available';
+          btn.disabled = true;
+        }}
+        if (tf === defaultTf) btn.classList.add('active');
+        btn.addEventListener('click', function() {{
+          if (btn.disabled) return;
+          switchSoloTf(tf, btn);
+        }});
+      }});
+      // Wire view toggle
+      document.querySelectorAll('.view-btn').forEach(function(btn) {{
+        btn.addEventListener('click', function() {{
+          var view = btn.dataset.view;
+          document.querySelectorAll('.view-btn').forEach(function(b) {{ b.classList.remove('active'); }});
+          btn.classList.add('active');
+          document.querySelectorAll('.view-cc, .view-tv').forEach(function(v) {{ v.style.display = 'none'; }});
+          if (view === 'cc') {{
+            document.querySelector('.view-cc[data-view-id="chart_solo"]').style.display = '';
+          }} else {{
+            var tv = document.querySelector('.view-tv[data-view-id="chart_solo"]');
+            tv.style.display = '';
+            loadTradingViewWidget('chart_solo', tv.dataset.tvSymbol);
+          }}
+        }});
+      }});
+      applyAnnotations(sym, 'chart_solo');
+    }}
+
+    function switchSoloTf(tf, btn) {{
+      var h = window.cc_chart_handles['lwc_chart_solo'];
+      if (!h) return;
+      var tfData = _getTfData(h.rawData, tf);
+      if (!tfData || !tfData.candles) return;
+      h.candleSeries.setData(tfData.candles);
+      if (h.volSeries && tfData.volume) h.volSeries.setData(tfData.volume);
+      ['ema_8','ema_21','ema_55','ema_100','ema_200'].forEach(function(k) {{
+        if (h.emaSeries[k]) h.emaSeries[k].setData(tfData[k] || []);
+      }});
+      h.chart.applyOptions({{ timeScale: {{ timeVisible: (tf === '1H') }} }});
+      h.chart.timeScale().fitContent();
+      document.querySelectorAll('.tf-btn').forEach(function(b) {{ b.classList.remove('active'); }});
+      if (btn) btn.classList.add('active');
+    }}
+
+    function updateCountdown() {{
+      var badge = document.getElementById('cd_chart_solo');
+      if (!badge) return;
+      var now = new Date();
+      var sym = '{symbol}';
+      var isCrypto = sym.indexOf('-USD') >= 0;
+      var target = new Date(now);
+      if (isCrypto) target.setUTCHours(24, 0, 0, 0);
+      else {{
+        target.setUTCHours(20, 0, 0, 0);
+        if (target <= now) target.setUTCDate(target.getUTCDate() + 1);
+        while (target.getUTCDay() === 6 || target.getUTCDay() === 0) target.setUTCDate(target.getUTCDate() + 1);
+      }}
+      var diffMs = Math.max(0, target - now);
+      var totalMin = Math.floor(diffMs / 60000);
+      var h = Math.floor(totalMin / 60);
+      var m = totalMin % 60;
+      badge.textContent = '⏱ ' + (isCrypto ? 'next UTC' : 'next NYSE') + ': ' + h + 'h ' + (m < 10 ? '0' : '') + m + 'm';
+    }}
+
+    window.addEventListener('load', function() {{
+      initChart();
+      updateCountdown();
+      setInterval(updateCountdown, 60000);
+      var stars = getStars();
+      var btn = document.getElementById('star-solo-btn');
+      if (btn) btn.textContent = (stars.indexOf('{symbol}') >= 0 ? '⭐' : '☆') + ' Toggle Watchlist';
+    }});
+  </script>
+</body></html>"""
+
+
+def build_single_chart_response(symbol_raw: str) -> str:
+    """Top-level builder called by the /chart route. Resolves symbol, fetches
+    data, builds Snapshot + chart data + watches + cached equity analysis,
+    renders standalone HTML. Returns full HTML string."""
+    sym = resolve_ticker(symbol_raw)
+    if not sym:
+        return "<html><body><h1>Invalid symbol</h1><a href='/'>← Back</a></body></html>"
+    daily_df, setups, weekly_df = scan_one(sym)
+    if daily_df is None or daily_df.empty:
+        return f"<html><body><h1>No data for {sym}</h1><p>yfinance returned no daily bars. Try a different ticker.</p><a href='/'>← Back</a></body></html>"
+    snap = build_snapshot_for_symbol(sym, daily_df, weekly_df=weekly_df)
+    chart_data = build_multi_tf_chart_data(sym, daily_df, fetch_hourly=True)
+    try:    watches = find_watches(sym, daily_df)
+    except Exception: watches = []
+    # Equity Model — cached, won't fetch fresh if recent
+    api_key, model = _load_groq_config()
+    equity_analysis = None
+    if api_key:
+        try:    equity_analysis = get_equity_analysis(sym, api_key, model, max_age_hours=24)
+        except Exception: equity_analysis = None
+    # AI senior trader if there's a fired setup
+    if setups and api_key:
+        for s in setups[:1]:
+            try:    s.ai_analysis = ai_enhance_setup(s, api_key, model)
+            except Exception: s.ai_analysis = ""
+    # Apply regime haircut if we have it from a recent scan
+    market_regime = fetch_market_regime()
+    if setups:
+        for s in setups:
+            s.conviction = regime_adjusts_conviction(s.conviction, market_regime)
+    return render_single_chart_html(
+        symbol=sym, snap=snap, chart_data=chart_data,
+        setups=setups, watches=watches,
+        equity_analysis=equity_analysis,
+        market_regime=market_regime,
+    )
 
 
 def serve_live(tickers: list[str], port: int, refresh_seconds: int, cache_seconds: int) -> int:
@@ -6501,6 +7348,26 @@ def serve_live(tickers: list[str], port: int, refresh_seconds: int, cache_second
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(html.encode("utf-8"))
+            elif parsed.path == "/chart":
+                # Wave 12 — standalone single-ticker chart page
+                sym_q = qs.get("symbol", [""])[0].strip()
+                if not sym_q:
+                    self.send_response(400)
+                    self.send_header("Content-Type", "text/html")
+                    self.end_headers()
+                    self.wfile.write(b"<h1>Missing ?symbol= parameter</h1><a href='/'>Back</a>")
+                    return
+                try:
+                    html_page = build_single_chart_response(sym_q)
+                except Exception as e:
+                    html_page = (f"<html><body style='font-family:system-ui;padding:30px;background:#0a0f1c;color:#e2e8f0'>"
+                                 f"<h1>Chart error for {sym_q}</h1><pre>{type(e).__name__}: {e}</pre>"
+                                 f"<a href='/' style='color:#22c55e'>← Back to scanner</a></body></html>")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(html_page.encode("utf-8"))
             elif parsed.path == "/health":
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")

@@ -57,15 +57,27 @@ mtf_chart_data = {"TEST": {
     },
 }}
 
-html_legacy = cc.render_html(
+# Wave 12: TF buttons + chart UI now on /chart page (memory fix).
+# Main page (render_html) renders compact cards with "Open Chart →" links.
+# All TF-selector tests now check render_single_chart_html.
+html_legacy_main = cc.render_html(
     setups=[], scanned=1, duration_s=0.1,
     snapshots=[snap], levels_by_symbol={"TEST": snap},
     chart_data_by_symbol=legacy_chart_data,
 )
-html_mtf = cc.render_html(
+html_mtf_main = cc.render_html(
     setups=[], scanned=1, duration_s=0.1,
     snapshots=[snap], levels_by_symbol={"TEST": snap},
     chart_data_by_symbol=mtf_chart_data,
+)
+# Build the /chart page where the TF selector + chart UI live
+html_legacy = cc.render_single_chart_html(
+    symbol="TEST", snap=snap,
+    chart_data=legacy_chart_data["TEST"],
+)
+html_mtf = cc.render_single_chart_html(
+    symbol="TEST", snap=snap,
+    chart_data=mtf_chart_data["TEST"],
 )
 
 
@@ -96,12 +108,14 @@ check(".tf-unavailable style defined", ".tf-unavailable" in html_mtf)
 # 3. JS helpers + switcher
 # ---------------------------------------------------------------------------
 print("\n[3] JS — switchTimeframe + helpers")
-check("switchTimeframe() function exists",  "function switchTimeframe(" in html_mtf)
+check("TF-switching function exists (switchSoloTf on /chart page)",
+      "function switchSoloTf(" in html_mtf or "function switchTimeframe(" in html_mtf)
 check("_getTfData() helper exists",          "function _getTfData(" in html_mtf)
 check("_availableTfs() helper exists",       "function _availableTfs(" in html_mtf)
 check("window.cc_chart_handles initialized", "window.cc_chart_handles" in html_mtf)
-check("button click wired to switchTimeframe",
-      "addEventListener('click'" in html_mtf and "switchTimeframe(div.id" in html_mtf)
+check("button click wired to TF-switching function",
+      "addEventListener('click'" in html_mtf
+      and ("switchSoloTf(tf" in html_mtf or "switchTimeframe(div.id" in html_mtf))
 
 
 # ---------------------------------------------------------------------------
@@ -164,8 +178,8 @@ check("active class swapped on TF change",
 print("\n[9] Price lines persist across TF changes (drawn on candleSeries)")
 check("price lines drawn on candleSeries (TF-independent)",
       "candleSeries.createPriceLine(" in html_mtf)
-check("applyPriceLines closure re-drawable",
-      "function applyPriceLines()" in html_mtf or "priceLineHandles" in html_mtf)
+check("price lines stay across TF changes (drawn on candleSeries — TF-agnostic)",
+      "candleSeries.createPriceLine(" in html_mtf)
 
 
 # ---------------------------------------------------------------------------

@@ -231,22 +231,25 @@ check("Key Levels panel shows PP, R1, S1",
 
 # ---------------------------------------------------------------------------
 # 9. Setup-card chart also gets the Fib/VWAP/Pivot/Round overlay
+#    Wave 12: charts moved to /chart page (memory fix). The setup chart lives
+#    on render_single_chart_html now, which gets the full Wave-1 overlay.
 # ---------------------------------------------------------------------------
-print("\n[9] Setup-card chart also has Wave-1 overlays")
+print("\n[9] Setup-card chart also has Wave-1 overlays (now on /chart page)")
 fake_setup = cc.Setup(
     symbol="FUBO", name="Test", direction="long",
     entry=20.0, stop_loss=18.0, targets=[24.0, 28.0],
     current_price=20.0, conviction=0.6, reasoning="x", citation="x",
     context_flags=[],
 )
-html_setup = cc.render_html(
-    setups=[fake_setup], scanned=1, duration_s=0.1,
-    levels_by_symbol={"FUBO": snap},
-    chart_data_by_symbol=chart_data,
+# Build the /chart page for FUBO (where the chart lives in Wave 12 architecture)
+html_setup = cc.render_single_chart_html(
+    symbol="FUBO", snap=snap,
+    chart_data=chart_data["FUBO"],
+    setups=[fake_setup],
 )
-# Find data-lines for the setup chart
-m2 = re.search(r'id="lwc_0" data-symbol="FUBO" data-lines=\'([^\']+)\'', html_setup)
-check("setup-card chart has data-lines", m2 is not None)
+# Find data-lines on the /chart page (id="lwc_chart_solo")
+m2 = re.search(r'id="lwc_chart_solo" data-symbol="FUBO" data-lines=\'([^\']+)\'', html_setup)
+check("setup-card chart has data-lines (on /chart page)", m2 is not None)
 if m2:
     setup_lines = _json.loads(m2.group(1))
     setup_titles = [l["title"] for l in setup_lines]
