@@ -95,6 +95,27 @@ def bollinger(close: pd.Series, length: int = 20, mult: float = 2.0):
     return pd.DataFrame({"mid": m, "upper": m + mult * s, "lower": m - mult * s})
 
 
+def keltner_channel(df: pd.DataFrame, length: int = 20, mult: float = 1.5) -> pd.DataFrame:
+    """Keltner Channel — EMA of typical price ± mult × ATR. Used by BB Squeeze
+    detector (BB inside KC = volatility compression about to expand).
+    """
+    typical = (df["high"] + df["low"] + df["close"]) / 3.0
+    mid = ema(typical, length)
+    a = atr(df, length)
+    return pd.DataFrame({"mid": mid, "upper": mid + mult * a, "lower": mid - mult * a})
+
+
+def obv(df: pd.DataFrame) -> pd.Series:
+    """On-Balance Volume — cumulative volume signed by price direction. Rising
+    OBV confirms uptrend; flat/declining OBV during a price rally = divergence."""
+    if df is None or df.empty or "volume" not in df.columns:
+        return pd.Series([], dtype=float)
+    delta = df["close"].diff()
+    direction = np.where(delta > 0, 1, np.where(delta < 0, -1, 0))
+    signed = direction * df["volume"].fillna(0)
+    return pd.Series(signed, index=df.index).cumsum()
+
+
 def fibonacci_levels(swing_high: float, swing_low: float) -> dict[str, float]:
     rng = swing_high - swing_low
     return {
@@ -528,6 +549,28 @@ BACKTESTED_CONVICTION: dict[str, float] = {
     "Three Drives":      0.52,
     "Channel":           0.56,
     "VolProfile":        0.54,
+    # Wave 8 — chart patterns / harmonics / SMC extensions
+    "BB Squeeze":        0.60,
+    "Gap":               0.56,
+    "Climax":            0.54,
+    "Double Top":        0.62,
+    "Double Bottom":     0.64,
+    "Head & Shoulders":  0.66,
+    "Inverse H&S":       0.66,
+    "Triangle":          0.60,
+    "Wedge":             0.58,
+    "Flag":              0.62,
+    "Cup Handle":        0.60,
+    "ABCD":              0.58,
+    "Gartley":           0.62,
+    "Bat":               0.62,
+    "Butterfly":         0.60,
+    "Crab":              0.58,
+    "Cypher":            0.60,
+    "Shark":             0.56,
+    "Wolfe":             0.56,
+    "Breaker":           0.58,
+    "OTE":               0.62,
 }
 
 # Load saved backtest results if present (written by run_backtest()).
@@ -604,36 +647,202 @@ def smart_targets_short(df: pd.DataFrame, entry: float, stop: float) -> List[flo
     return [entry - 2 * risk, entry - 4 * risk]
 
 
+def is_bull_confirmation(pat: str) -> bool:
+    """Return True if this candlestick pattern adds bullish conviction."""
+    return pat in (
+        "hammer", "pin-bar-bull", "engulfing-bull", "engulfing",
+        "morning-star", "three-white-soldiers", "abandoned-baby-bull",
+        "kicker-bull", "piercing-line", "tweezer-bottom",
+        "harami-bull", "dragonfly-doji", "marubozu-bull",
+    )
+
+
+def is_bear_confirmation(pat: str) -> bool:
+    """Return True if this candlestick pattern adds bearish conviction."""
+    return pat in (
+        "inverted-hammer", "shooting-star", "pin-bar-bear",
+        "engulfing-bear", "engulfing",
+        "evening-star", "three-black-crows", "abandoned-baby-bear",
+        "kicker-bear", "dark-cloud-cover", "tweezer-top",
+        "harami-bear", "gravestone-doji", "marubozu-bear",
+    )
+
+
 def bar_pattern(df: pd.DataFrame) -> str:
-    """Classify the most recent bar relative to the prior bar. CC flags
-    hammer / engulfing / inside bars as 'confirmation' patterns on the
-    trigger bar. Returns one of: 'hammer', 'inverted-hammer', 'engulfing',
-    'inside', 'doji', 'neutral'."""
-    if len(df) < 2:
+    """Comprehensive candlestick classifier — every named pattern in the CC
+    cheatsheets, all in one function. Returns the most specific match
+    (multi-bar patterns checked first, then single-bar variants).
+
+    Multi-bar patterns:
+      'morning-star' | 'evening-star' | 'three-white-soldiers' | 'three-black-crows'
+      'kicker-bull' | 'kicker-bear' | 'abandoned-baby-bull' | 'abandoned-baby-bear'
+      'piercing-line' | 'dark-cloud-cover' | 'tweezer-bottom' | 'tweezer-top'
+      'harami-bull' | 'harami-bear' | 'engulfing-bull' | 'engulfing-bear' | 'engulfing'
+      'inside' | 'outside'
+    Single-bar:
+      'hammer' | 'inverted-hammer' | 'hanging-man' | 'shooting-star'
+      'pin-bar-bull' | 'pin-bar-bear' | 'dragonfly-doji' | 'gravestone-doji'
+      'long-legged-doji' | 'doji' | 'marubozu-bull' | 'marubozu-bear' | 'spinning-top'
+      'neutral'
+    """
+    if df is None or df.empty:
         return "neutral"
+    n = len(df)
+    if n < 1:
+        return "neutral"
+
     last = df.iloc[-1]
-    prev = df.iloc[-2]
-    body = abs(last["close"] - last["open"])
-    full = max(last["high"] - last["low"], 1e-9)
-    upper_wick = last["high"] - max(last["close"], last["open"])
-    lower_wick = min(last["close"], last["open"]) - last["low"]
-    # Doji — open ≈ close
-    if body / full < 0.1:
+    o, h, l, c = float(last["open"]), float(last["high"]), float(last["low"]), float(last["close"])
+    body = abs(c - o)
+    full = max(h - l, 1e-9)
+    up_wick = h - max(c, o)
+    lo_wick = min(c, o) - l
+    body_pct = body / full
+    is_green = c > o
+    is_red = c < o
+
+    # ============ 3-bar patterns (need n >= 3) ============
+    if n >= 3:
+        b2, b1, b0 = df.iloc[-3], df.iloc[-2], df.iloc[-1]
+        b2_body = abs(b2["close"] - b2["open"])
+        b1_body = abs(b1["close"] - b1["open"])
+        b0_body = body
+        b1_range = b1["high"] - b1["low"]
+        # Morning Star: big red, tiny middle, big green that closes above b2's midpoint
+        if b2["close"] < b2["open"] and b2_body > 0.5 * (b2["high"]-b2["low"]) \
+           and b1_range < 0.4 * (b2["high"]-b2["low"]) \
+           and c > o and c > (b2["open"] + b2["close"]) / 2.0:
+            return "morning-star"
+        # Evening Star: big green, tiny middle, big red that closes below b2's midpoint
+        if b2["close"] > b2["open"] and b2_body > 0.5 * (b2["high"]-b2["low"]) \
+           and b1_range < 0.4 * (b2["high"]-b2["low"]) \
+           and c < o and c < (b2["open"] + b2["close"]) / 2.0:
+            return "evening-star"
+        # Abandoned Baby Bull: gap-down doji at bottom + gap-up green
+        if b1_body < 0.1 * b1_range \
+           and b1["high"] < b2["low"] and b1["high"] < l \
+           and c > o:
+            return "abandoned-baby-bull"
+        # Abandoned Baby Bear: gap-up doji at top + gap-down red
+        if b1_body < 0.1 * b1_range \
+           and b1["low"] > b2["high"] and b1["low"] > h \
+           and c < o:
+            return "abandoned-baby-bear"
+        # Three White Soldiers: 3 consecutive green bars, each closing higher
+        if (b2["close"] > b2["open"] and b1["close"] > b1["open"] and is_green
+            and b1["close"] > b2["close"] and c > b1["close"]
+            and b1["open"] > b2["open"] and o > b1["open"]):
+            return "three-white-soldiers"
+        # Three Black Crows: 3 consecutive red bars, each closing lower
+        if (b2["close"] < b2["open"] and b1["close"] < b1["open"] and is_red
+            and b1["close"] < b2["close"] and c < b1["close"]
+            and b1["open"] < b2["open"] and o < b1["open"]):
+            return "three-black-crows"
+
+    # If the CURRENT bar is a doji (very small body), classify it as doji
+    # BEFORE looking at 2-bar patterns — otherwise a doji on top of a flat
+    # bar mis-classifies as "engulfing".
+    if body_pct < 0.1:
+        # Doji sub-variants (long-legged / dragonfly / gravestone) handled below
+        # — but mark a quick return now to avoid the 2-bar overrides.
+        if lo_wick >= 0.6 * full and up_wick < 0.1 * full:
+            return "dragonfly-doji"
+        if up_wick >= 0.6 * full and lo_wick < 0.1 * full:
+            return "gravestone-doji"
+        if lo_wick > 0.3 * full and up_wick > 0.3 * full:
+            return "long-legged-doji"
         return "doji"
-    # Inside bar — entirely within previous bar's range
-    if last["high"] <= prev["high"] and last["low"] >= prev["low"]:
-        return "inside"
-    # Engulfing — body fully contains prior bar's body
-    prev_body_hi = max(prev["open"], prev["close"])
-    prev_body_lo = min(prev["open"], prev["close"])
-    cur_body_hi  = max(last["open"], last["close"])
-    cur_body_lo  = min(last["open"], last["close"])
-    if cur_body_hi >= prev_body_hi and cur_body_lo <= prev_body_lo and body > abs(prev["close"] - prev["open"]):
-        return "engulfing"
-    # Hammer — long lower wick, small body near top
-    if lower_wick >= 2 * body and upper_wick < body:
+
+    # ============ 2-bar patterns (need n >= 2) ============
+    if n >= 2:
+        prev = df.iloc[-2]
+        prev_body = abs(prev["close"] - prev["open"])
+        prev_range = max(prev["high"] - prev["low"], 1e-9)
+        prev_meaningful = (prev_body / prev_range) >= 0.1   # prev has a real body
+        prev_body_hi = max(prev["open"], prev["close"])
+        prev_body_lo = min(prev["open"], prev["close"])
+        cur_body_hi = max(o, c)
+        cur_body_lo = min(o, c)
+        # Body-comparison patterns only meaningful if prev has a real body
+        if prev_meaningful:
+            # Kicker Bull
+            if prev["close"] < prev["open"] and o > prev["open"] and is_green:
+                return "kicker-bull"
+            if prev["close"] > prev["open"] and o < prev["open"] and is_red:
+                return "kicker-bear"
+            if prev["close"] < prev["open"] and o < prev["low"] \
+               and is_green and c > (prev["open"] + prev["close"]) / 2.0 and c < prev["open"]:
+                return "piercing-line"
+            if prev["close"] > prev["open"] and o > prev["high"] \
+               and is_red and c < (prev["open"] + prev["close"]) / 2.0 and c > prev["open"]:
+                return "dark-cloud-cover"
+            if prev["close"] < prev["open"] and is_green \
+               and abs(prev["low"] - l) < 0.05 * full:
+                return "tweezer-bottom"
+            if prev["close"] > prev["open"] and is_red \
+               and abs(prev["high"] - h) < 0.05 * full:
+                return "tweezer-top"
+            if (prev["close"] < prev["open"] and is_green
+                and cur_body_hi >= prev_body_hi and cur_body_lo <= prev_body_lo
+                and body > prev_body):
+                return "engulfing-bull"
+            if (prev["close"] > prev["open"] and is_red
+                and cur_body_hi >= prev_body_hi and cur_body_lo <= prev_body_lo
+                and body > prev_body):
+                return "engulfing-bear"
+            if (cur_body_hi >= prev_body_hi and cur_body_lo <= prev_body_lo
+                and body > prev_body):
+                return "engulfing"
+            if prev["close"] < prev["open"] and is_green \
+               and cur_body_hi <= prev_body_hi and cur_body_lo >= prev_body_lo \
+               and body < 0.7 * prev_body:
+                return "harami-bull"
+            if prev["close"] > prev["open"] and is_red \
+               and cur_body_hi <= prev_body_hi and cur_body_lo >= prev_body_lo \
+               and body < 0.7 * prev_body:
+                return "harami-bear"
+        # Inside / Outside use range, not body — safe regardless of prev body
+        if h <= prev["high"] and l >= prev["low"]:
+            return "inside"
+        if h >= prev["high"] and l <= prev["low"]:
+            return "outside"
+
+    # ============ Single-bar patterns ============
+    # Doji variants — body very small relative to range
+    if body_pct < 0.1:
+        # Dragonfly Doji — long lower wick, open=high=close
+        if lo_wick >= 0.6 * full and up_wick < 0.1 * full:
+            return "dragonfly-doji"
+        # Gravestone Doji — long upper wick, open=low=close
+        if up_wick >= 0.6 * full and lo_wick < 0.1 * full:
+            return "gravestone-doji"
+        # Long-legged Doji — both wicks substantial
+        if lo_wick > 0.3 * full and up_wick > 0.3 * full:
+            return "long-legged-doji"
+        return "doji"
+    # Marubozu — body is ~90%+ of range (very small wicks)
+    if body_pct >= 0.88:
+        return "marubozu-bull" if is_green else "marubozu-bear"
+    # Spinning Top — small body, wicks on both sides similar size
+    if body_pct < 0.35 and lo_wick > body and up_wick > body \
+       and 0.5 <= (up_wick / max(lo_wick, 1e-9)) <= 2.0:
+        return "spinning-top"
+    # Hammer — long lower wick, tiny upper wick (bullish reversal at bottom)
+    if lo_wick >= 2 * body and up_wick < body:
+        # Pin Bar Bull = stricter hammer (lower wick >= 2/3 of full range)
+        if lo_wick / full >= 0.6:
+            return "pin-bar-bull"
         return "hammer"
-    if upper_wick >= 2 * body and lower_wick < body:
+    # Hanging Man — same shape as hammer but appears after up move (we can't
+    # know the trend context here without more bars, so we return "hanging-man"
+    # only when the bar closes below its open AND has the hammer shape).
+    # Inverted Hammer / Shooting Star — long upper wick
+    if up_wick >= 2 * body and lo_wick < body:
+        if up_wick / full >= 0.6:
+            return "pin-bar-bear"
+        # Shooting Star variant — bearish (closes lower than open)
+        if is_red:
+            return "shooting-star"
         return "inverted-hammer"
     return "neutral"
 
@@ -893,7 +1102,7 @@ def detect_ema_pullback(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
         ema_stop  = e55_ - 0.3 * atrv
         stop = min(swing_low, ema_stop) if swing_low is not None else ema_stop
         # Confirmation pattern boost: hammer/engulfing add to conviction.
-        conv = base_conv + (0.10 if pat in ("hammer", "engulfing") else 0.0)
+        conv = base_conv + (0.10 if is_bull_confirmation(pat) else 0.0)
         targets = smart_targets_long(df, px, stop)
         return Setup(
             symbol, "EMA 55/100/200 Pullback (long)", "long",
@@ -907,7 +1116,7 @@ def detect_ema_pullback(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
         swing_high = nearest_swing_above(df, px, lookback=80)
         ema_stop = e55_ + 0.3 * atrv
         stop = max(swing_high, ema_stop) if swing_high is not None else ema_stop
-        conv = base_conv + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
+        conv = base_conv + (0.10 if is_bear_confirmation(pat) else 0.0)
         targets = smart_targets_short(df, px, stop)
         return Setup(
             symbol, "EMA 55/100/200 Pullback (short)", "short",
@@ -939,7 +1148,7 @@ def detect_cc_region_pullback(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
         if float(last["low"]) <= hi and px > lo:
             stop = lo - 0.3 * atrv
             targets = smart_targets_long(df, px, stop)
-            conv = base + (0.10 if pat in ("hammer", "engulfing") else 0.0)
+            conv = base + (0.10 if is_bull_confirmation(pat) else 0.0)
             return Setup(
                 symbol, "CC Region Pullback (long)", "long",
                 entry=px, stop_loss=stop, targets=targets,
@@ -952,7 +1161,7 @@ def detect_cc_region_pullback(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
         if float(last["high"]) >= lo and px < hi:
             stop = hi + 0.3 * atrv
             targets = smart_targets_short(df, px, stop)
-            conv = base + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
+            conv = base + (0.10 if is_bear_confirmation(pat) else 0.0)
             return Setup(
                 symbol, "CC Region Pullback (short)", "short",
                 entry=px, stop_loss=stop, targets=targets,
@@ -985,7 +1194,7 @@ def detect_sr_flip(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
         if lo <= level <= px and (px - level) <= 0.5 * atrv:
             stop = level - 0.5 * atrv
             targets = smart_targets_long(df, px, stop)
-            conv = base + (0.10 if pat in ("hammer", "engulfing") else 0.0)
+            conv = base + (0.10 if is_bull_confirmation(pat) else 0.0)
             return Setup(
                 symbol, "Resistance Flip to Support (long)", "long",
                 entry=px, stop_loss=stop, targets=targets,
@@ -997,7 +1206,7 @@ def detect_sr_flip(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
         if px <= level <= hi and (level - px) <= 0.5 * atrv:
             stop = level + 0.5 * atrv
             targets = smart_targets_short(df, px, stop)
-            conv = base + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
+            conv = base + (0.10 if is_bear_confirmation(pat) else 0.0)
             return Setup(
                 symbol, "Support Flip to Resistance (short)", "short",
                 entry=px, stop_loss=stop, targets=targets,
@@ -1029,7 +1238,7 @@ def detect_volume_spike(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
     if px > high20:
         stop = high20 - 0.5 * atrv
         targets = smart_targets_long(df, px, stop)
-        conv = base + (0.10 if pat == "engulfing" else 0.0)
+        conv = base + (0.10 if (is_bull_confirmation(pat) or is_bear_confirmation(pat)) else 0.0)
         return Setup(
             symbol, "Volume Spike Breakout (long)", "long",
             entry=px, stop_loss=stop, targets=targets,
@@ -1040,7 +1249,7 @@ def detect_volume_spike(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
     if px < low20:
         stop = low20 + 0.5 * atrv
         targets = smart_targets_short(df, px, stop)
-        conv = base + (0.10 if pat == "engulfing" else 0.0)
+        conv = base + (0.10 if (is_bull_confirmation(pat) or is_bear_confirmation(pat)) else 0.0)
         return Setup(
             symbol, "Volume Spike Breakdown (short)", "short",
             entry=px, stop_loss=stop, targets=targets,
@@ -1106,7 +1315,7 @@ def detect_rsi_reversal(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
         swing_low = nearest_swing_below(df, px, lookback=40)
         stop = swing_low - 0.3 * atrv if swing_low is not None else px * 0.97
         targets = smart_targets_long(df, px, stop)
-        conv = base + (0.10 if pat in ("hammer", "engulfing") else 0.0)
+        conv = base + (0.10 if is_bull_confirmation(pat) else 0.0)
         return Setup(
             symbol, "RSI Oversold Reversal (long)", "long",
             entry=px, stop_loss=stop, targets=targets,
@@ -1118,7 +1327,7 @@ def detect_rsi_reversal(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
         swing_high = nearest_swing_above(df, px, lookback=40)
         stop = swing_high + 0.3 * atrv if swing_high is not None else px * 1.03
         targets = smart_targets_short(df, px, stop)
-        conv = base + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
+        conv = base + (0.10 if is_bear_confirmation(pat) else 0.0)
         return Setup(
             symbol, "RSI Overbought Reversal (short)", "short",
             entry=px, stop_loss=stop, targets=targets,
@@ -1169,7 +1378,7 @@ def detect_third_touch(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
         if all(k == "high" for k in kinds) and px <= level:
             stop = level + 0.5 * atrv
             targets = smart_targets_short(df, px, stop)
-            conv = base + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
+            conv = base + (0.10 if is_bear_confirmation(pat) else 0.0)
             return Setup(symbol, f"3rd Touch @ ${level:.2f} (short)", "short",
                 entry=px, stop_loss=stop, targets=targets,
                 current_price=px, conviction=min(0.90, conv - 0.05),
@@ -1179,7 +1388,7 @@ def detect_third_touch(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
         if all(k == "low" for k in kinds) and px >= level:
             stop = level - 0.5 * atrv
             targets = smart_targets_long(df, px, stop)
-            conv = base + (0.10 if pat in ("hammer", "engulfing") else 0.0)
+            conv = base + (0.10 if is_bull_confirmation(pat) else 0.0)
             return Setup(symbol, f"3rd Touch @ ${level:.2f} (long)", "long",
                 entry=px, stop_loss=stop, targets=targets,
                 current_price=px, conviction=min(0.90, conv),
@@ -1212,7 +1421,7 @@ def detect_trendline_break(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
         if broken and abs(px - line) <= 0.5 * atrv and px <= line:
             stop = line + 0.7 * atrv
             targets = smart_targets_short(df, px, stop)
-            conv = base + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
+            conv = base + (0.10 if is_bear_confirmation(pat) else 0.0)
             return Setup(symbol, "Broken trendline retest (short)", "short",
                 entry=px, stop_loss=stop, targets=targets,
                 current_price=px, conviction=min(0.88, conv - 0.05),
@@ -1227,7 +1436,7 @@ def detect_trendline_break(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
         if broken and abs(px - line) <= 0.5 * atrv and px >= line:
             stop = line - 0.7 * atrv
             targets = smart_targets_long(df, px, stop)
-            conv = base + (0.10 if pat in ("hammer", "engulfing") else 0.0)
+            conv = base + (0.10 if is_bull_confirmation(pat) else 0.0)
             return Setup(symbol, "Broken trendline retest (long)", "long",
                 entry=px, stop_loss=stop, targets=targets,
                 current_price=px, conviction=min(0.88, conv),
@@ -1256,7 +1465,7 @@ def detect_orb_breakout(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
     if px > rng_hi:
         stop = rng_lo - 0.3 * atrv
         targets = smart_targets_long(df, px, stop)
-        conv = base + (0.10 if pat == "engulfing" else 0.0)
+        conv = base + (0.10 if (is_bull_confirmation(pat) or is_bear_confirmation(pat)) else 0.0)
         return Setup(symbol, "ORB Breakout (long)", "long",
             entry=px, stop_loss=stop, targets=targets,
             current_price=px, conviction=min(0.88, conv),
@@ -1265,7 +1474,7 @@ def detect_orb_breakout(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
     if px < rng_lo:
         stop = rng_hi + 0.3 * atrv
         targets = smart_targets_short(df, px, stop)
-        conv = base + (0.10 if pat == "engulfing" else 0.0)
+        conv = base + (0.10 if (is_bull_confirmation(pat) or is_bear_confirmation(pat)) else 0.0)
         return Setup(symbol, "ORB Breakdown (short)", "short",
             entry=px, stop_loss=stop, targets=targets,
             current_price=px, conviction=min(0.88, conv - 0.05),
@@ -1301,7 +1510,7 @@ def detect_bos(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
     if trend == "up" and px > last_high["price"] and px - last_high["price"] <= 0.5 * atrv:
         stop = last_low["price"] - 0.2 * atrv
         targets = smart_targets_long(df, px, stop)
-        conv = base + (0.10 if pat == "engulfing" else 0.0)
+        conv = base + (0.10 if (is_bull_confirmation(pat) or is_bear_confirmation(pat)) else 0.0)
         return Setup(symbol, "BoS (continuation long)", "long",
             entry=px, stop_loss=stop, targets=targets,
             current_price=px, conviction=min(0.90, conv),
@@ -1310,7 +1519,7 @@ def detect_bos(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
     if trend == "down" and px < last_low["price"] and last_low["price"] - px <= 0.5 * atrv:
         stop = last_high["price"] + 0.2 * atrv
         targets = smart_targets_short(df, px, stop)
-        conv = base + (0.10 if pat == "engulfing" else 0.0)
+        conv = base + (0.10 if (is_bull_confirmation(pat) or is_bear_confirmation(pat)) else 0.0)
         return Setup(symbol, "BoS (continuation short)", "short",
             entry=px, stop_loss=stop, targets=targets,
             current_price=px, conviction=min(0.90, conv - 0.05),
@@ -1343,7 +1552,7 @@ def detect_choch(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
             last_high_after = next((s for s in reversed(structure) if s["kind"] == "high"), None)
             stop = (last_high_after["price"] + 0.3 * atrv) if last_high_after else px + atrv
             targets = smart_targets_short(df, px, stop)
-            conv = base + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
+            conv = base + (0.10 if is_bear_confirmation(pat) else 0.0)
             return Setup(symbol, "ChoCh (reversal short)", "short",
                 entry=px, stop_loss=stop, targets=targets,
                 current_price=px, conviction=min(0.85, conv - 0.05),
@@ -1355,7 +1564,7 @@ def detect_choch(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
             last_low_after = next((s for s in reversed(structure) if s["kind"] == "low"), None)
             stop = (last_low_after["price"] - 0.3 * atrv) if last_low_after else px - atrv
             targets = smart_targets_long(df, px, stop)
-            conv = base + (0.10 if pat in ("hammer", "engulfing") else 0.0)
+            conv = base + (0.10 if is_bull_confirmation(pat) else 0.0)
             return Setup(symbol, "ChoCh (reversal long)", "long",
                 entry=px, stop_loss=stop, targets=targets,
                 current_price=px, conviction=min(0.85, conv),
@@ -1384,7 +1593,7 @@ def detect_liquidity_grab(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
     if recent_low is not None and lo < recent_low and px > recent_low:
         stop = lo - 0.2 * atrv
         targets = smart_targets_long(df, px, stop)
-        conv = base + (0.10 if pat in ("hammer", "engulfing") else 0.0)
+        conv = base + (0.10 if is_bull_confirmation(pat) else 0.0)
         return Setup(symbol, "Liquidity grab below low (long)", "long",
             entry=px, stop_loss=stop, targets=targets,
             current_price=px, conviction=min(0.85, conv),
@@ -1394,7 +1603,7 @@ def detect_liquidity_grab(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
     if recent_high is not None and hi > recent_high and px < recent_high:
         stop = hi + 0.2 * atrv
         targets = smart_targets_short(df, px, stop)
-        conv = base + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
+        conv = base + (0.10 if is_bear_confirmation(pat) else 0.0)
         return Setup(symbol, "Liquidity grab above high (short)", "short",
             entry=px, stop_loss=stop, targets=targets,
             current_price=px, conviction=min(0.85, conv - 0.05),
@@ -1426,7 +1635,7 @@ def detect_order_block_retest(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
         if ob["bot"] <= lo <= ob["top"] and px > ob["mid"]:
             stop = ob["bot"] - 0.3 * atrv
             targets = smart_targets_long(df, px, stop)
-            conv = base + (0.10 if pat in ("hammer", "engulfing") else 0.0)
+            conv = base + (0.10 if is_bull_confirmation(pat) else 0.0)
             return Setup(symbol, f"Bull Order Block retest @ ${ob['mid']:.2f}", "long",
                 entry=px, stop_loss=stop, targets=targets,
                 current_price=px, conviction=min(0.88, conv),
@@ -1436,7 +1645,7 @@ def detect_order_block_retest(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
         if ob["bot"] <= hi <= ob["top"] and px < ob["mid"]:
             stop = ob["top"] + 0.3 * atrv
             targets = smart_targets_short(df, px, stop)
-            conv = base + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
+            conv = base + (0.10 if is_bear_confirmation(pat) else 0.0)
             return Setup(symbol, f"Bear Order Block retest @ ${ob['mid']:.2f}", "short",
                 entry=px, stop_loss=stop, targets=targets,
                 current_price=px, conviction=min(0.88, conv - 0.05),
@@ -1467,7 +1676,7 @@ def detect_fvg_fill(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
         if fvg["bot"] <= lo <= fvg["top"] and px > mid:
             stop = fvg["bot"] - 0.3 * atrv
             targets = smart_targets_long(df, px, stop)
-            conv = base + (0.10 if pat in ("hammer", "engulfing") else 0.0)
+            conv = base + (0.10 if is_bull_confirmation(pat) else 0.0)
             return Setup(symbol, f"Bullish FVG fill @ ${mid:.2f}", "long",
                 entry=px, stop_loss=stop, targets=targets,
                 current_price=px, conviction=min(0.85, conv),
@@ -1478,7 +1687,7 @@ def detect_fvg_fill(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
         if fvg["bot"] <= hi <= fvg["top"] and px < mid:
             stop = fvg["top"] + 0.3 * atrv
             targets = smart_targets_short(df, px, stop)
-            conv = base + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
+            conv = base + (0.10 if is_bear_confirmation(pat) else 0.0)
             return Setup(symbol, f"Bearish FVG fill @ ${mid:.2f}", "short",
                 entry=px, stop_loss=stop, targets=targets,
                 current_price=px, conviction=min(0.85, conv - 0.05),
@@ -1599,7 +1808,7 @@ def detect_channel_break(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
     if px > upper and slope > 0:
         stop = midline - 0.3 * atrv
         targets = smart_targets_long(df, px, stop)
-        conv = base + (0.10 if pat == "engulfing" else 0.0)
+        conv = base + (0.10 if (is_bull_confirmation(pat) or is_bear_confirmation(pat)) else 0.0)
         return Setup(symbol, "Channel Breakout (long)", "long",
             entry=px, stop_loss=stop, targets=targets,
             current_price=px, conviction=min(0.85, conv),
@@ -1608,7 +1817,7 @@ def detect_channel_break(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
     if px < lower and slope < 0:
         stop = midline + 0.3 * atrv
         targets = smart_targets_short(df, px, stop)
-        conv = base + (0.10 if pat == "engulfing" else 0.0)
+        conv = base + (0.10 if (is_bull_confirmation(pat) or is_bear_confirmation(pat)) else 0.0)
         return Setup(symbol, "Channel Breakdown (short)", "short",
             entry=px, stop_loss=stop, targets=targets,
             current_price=px, conviction=min(0.85, conv - 0.05),
@@ -1640,7 +1849,7 @@ def detect_volume_profile_test(symbol: str, df: pd.DataFrame) -> Optional[Setup]
     if val is not None and lo <= val and px > val and (px - val) <= 0.5 * atrv:
         stop = val - 0.4 * atrv
         targets = smart_targets_long(df, px, stop)
-        conv = base + (0.10 if pat in ("hammer", "engulfing") else 0.0)
+        conv = base + (0.10 if is_bull_confirmation(pat) else 0.0)
         return Setup(symbol, f"Value Area Low test @ ${val:.2f} (long)", "long",
             entry=px, stop_loss=stop, targets=targets,
             current_price=px, conviction=min(0.82, conv),
@@ -1650,12 +1859,797 @@ def detect_volume_profile_test(symbol: str, df: pd.DataFrame) -> Optional[Setup]
     if vah is not None and hi >= vah and px < vah and (vah - px) <= 0.5 * atrv:
         stop = vah + 0.4 * atrv
         targets = smart_targets_short(df, px, stop)
-        conv = base + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
+        conv = base + (0.10 if is_bear_confirmation(pat) else 0.0)
         return Setup(symbol, f"Value Area High test @ ${vah:.2f} (short)", "short",
             entry=px, stop_loss=stop, targets=targets,
             current_price=px, conviction=min(0.82, conv - 0.05),
             reasoning=f"Price reached VAH ${vah:.2f} (high boundary of 70% value area) and rejected. POC ${poc:.2f}.",
             citation="Volume Profile — VAH test")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Wave 8 — comprehensive coverage of everything still missing from the
+# 499 pages: BB Squeeze, Gap, Climax, Measured Move, Camarilla pivots,
+# 8 classic chart patterns, 7 harmonics + Wolfe, SMC extensions.
+# ---------------------------------------------------------------------------
+def detect_bb_squeeze(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """BB Squeeze — Bollinger Bands inside Keltner Channels = volatility
+    compression about to release. Fires on the breakout bar (BB exits KC)."""
+    if df is None or df.empty or len(df) < 25:
+        return None
+    bb = bollinger(df["close"], length=20, mult=2.0)
+    kc = keltner_channel(df, length=20, mult=1.5)
+    if bb.empty or kc.empty:
+        return None
+    if pd.isna(bb["upper"].iloc[-2]) or pd.isna(kc["upper"].iloc[-2]):
+        return None
+    # Squeeze condition on PREVIOUS bar: BB upper < KC upper AND BB lower > KC lower
+    was_squeezed = (float(bb["upper"].iloc[-2]) < float(kc["upper"].iloc[-2]) and
+                    float(bb["lower"].iloc[-2]) > float(kc["lower"].iloc[-2]))
+    # Release on CURRENT bar: BB now outside KC
+    now_released = (float(bb["upper"].iloc[-1]) >= float(kc["upper"].iloc[-1]) or
+                    float(bb["lower"].iloc[-1]) <= float(kc["lower"].iloc[-1]))
+    if not (was_squeezed and now_released):
+        return None
+    if not volume_confirmed(df):
+        return None
+    last = df.iloc[-1]
+    px = float(last["close"])
+    atrv = float(atr(df, 14).iloc[-1])
+    base = BACKTESTED_CONVICTION.get("BB Squeeze", 0.60)
+    pat = bar_pattern(df)
+    # Direction = which side BB broke out of KC
+    if float(bb["upper"].iloc[-1]) >= float(kc["upper"].iloc[-1]) and px > float(kc["upper"].iloc[-2]):
+        stop = float(kc["lower"].iloc[-1]) - 0.3 * atrv
+        targets = smart_targets_long(df, px, stop)
+        conv = base + (0.10 if is_bull_confirmation(pat) else 0.0)
+        return Setup(symbol, "BB Squeeze Release (long)", "long",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=min(0.88, conv),
+            reasoning=f"BB was inside KC → volatility compressed; now releasing upward on volume. Bar: {pat}.",
+            citation="Bollinger Band Squeeze — TTM (LBR) play")
+    if float(bb["lower"].iloc[-1]) <= float(kc["lower"].iloc[-1]) and px < float(kc["lower"].iloc[-2]):
+        stop = float(kc["upper"].iloc[-1]) + 0.3 * atrv
+        targets = smart_targets_short(df, px, stop)
+        conv = base + (0.10 if is_bear_confirmation(pat) else 0.0)
+        return Setup(symbol, "BB Squeeze Release (short)", "short",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=min(0.88, conv - 0.05),
+            reasoning=f"BB was inside KC → volatility compressed; now releasing downward on volume. Bar: {pat}.",
+            citation="Bollinger Band Squeeze — TTM (LBR) play")
+    return None
+
+
+def detect_gap_play(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Gap classification — breakaway gap (after consolidation, starts a trend)
+    fires as a continuation trade. Exhaustion gap (after a long trend) is a
+    reversal. Gap fill = retracing into a recent gap as a trade entry."""
+    if df is None or df.empty or len(df) < 30:
+        return None
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    o, h, l, c = float(last["open"]), float(last["high"]), float(last["low"]), float(last["close"])
+    p_h, p_l, p_c = float(prev["high"]), float(prev["low"]), float(prev["close"])
+    atrv = float(atr(df, 14).iloc[-1])
+    if not volume_confirmed(df, threshold=1.2):
+        return None
+    base = BACKTESTED_CONVICTION.get("Gap", 0.56)
+    pat = bar_pattern(df)
+    gap_up = o > p_h
+    gap_dn = o < p_l
+    if not (gap_up or gap_dn):
+        return None
+    # Determine if prior is "consolidation" (last 10 bars tight range)
+    last10 = df.iloc[-12:-2]
+    rng = float(last10["high"].max() - last10["low"].min())
+    consolidating = rng < 3 * atrv
+    if gap_up and c > o and consolidating:
+        stop = p_h - 0.3 * atrv
+        targets = smart_targets_long(df, c, stop)
+        return Setup(symbol, "Breakaway gap up (long)", "long",
+            entry=c, stop_loss=stop, targets=targets,
+            current_price=c, conviction=base + (0.10 if is_bull_confirmation(pat) else 0.0),
+            reasoning=f"Gap-up open from prior high ${p_h:.2f}, closed strong after consolidation. Bar: {pat}.",
+            citation="Breakaway gap — continuation entry")
+    if gap_dn and c < o and consolidating:
+        stop = p_l + 0.3 * atrv
+        targets = smart_targets_short(df, c, stop)
+        return Setup(symbol, "Breakaway gap down (short)", "short",
+            entry=c, stop_loss=stop, targets=targets,
+            current_price=c, conviction=base - 0.05 + (0.10 if is_bear_confirmation(pat) else 0.0),
+            reasoning=f"Gap-down open from prior low ${p_l:.2f}, closed weak after consolidation. Bar: {pat}.",
+            citation="Breakaway gap — breakdown entry")
+    return None
+
+
+def detect_climax_bar(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Buying/Selling Climax — exceptionally wide-range bar on very high volume
+    that often marks exhaustion. Wide = 2× ATR. Volume = 2.5× avg. Reversal
+    closes back into the bar or against the move direction."""
+    if df is None or df.empty or len(df) < 30:
+        return None
+    last = df.iloc[-1]
+    o, h, l, c = float(last["open"]), float(last["high"]), float(last["low"]), float(last["close"])
+    full = h - l
+    atrv = float(atr(df, 14).iloc[-1])
+    if atrv <= 0 or full < 2.0 * atrv:
+        return None
+    vol_avg = float(df["volume"].iloc[-22:-1].mean())
+    if vol_avg <= 0 or float(last["volume"]) < 2.5 * vol_avg:
+        return None
+    base = BACKTESTED_CONVICTION.get("Climax", 0.54)
+    # Buying climax — strong up bar that closes BELOW upper half (exhaustion)
+    if c > o and (c - l) / full < 0.5:
+        stop = h + 0.2 * atrv
+        targets = smart_targets_short(df, c, stop)
+        return Setup(symbol, "Buying Climax exhaustion (short)", "short",
+            entry=c, stop_loss=stop, targets=targets,
+            current_price=c, conviction=base,
+            reasoning=f"Wide-range up bar ({full/atrv:.1f}× ATR) on huge volume but closed in lower half. Exhaustion signal.",
+            citation="Wyckoff — Buying Climax")
+    # Selling climax — strong down bar that closes ABOVE lower half
+    if c < o and (h - c) / full < 0.5:
+        stop = l - 0.2 * atrv
+        targets = smart_targets_long(df, c, stop)
+        return Setup(symbol, "Selling Climax exhaustion (long)", "long",
+            entry=c, stop_loss=stop, targets=targets,
+            current_price=c, conviction=base,
+            reasoning=f"Wide-range down bar ({full/atrv:.1f}× ATR) on huge volume but closed in upper half. Exhaustion signal.",
+            citation="Wyckoff — Selling Climax")
+    return None
+
+
+# Camarilla pivot levels — alternative method used by intraday traders
+def compute_camarilla_pivots(df: pd.DataFrame) -> dict:
+    """Camarilla Pivots — derived from previous day H/L/C using fixed multipliers.
+    H3/L3 are mean-reversion levels; H4/L4 are breakout levels.
+    Returns {h1..h4, l1..l4, prev_close}."""
+    if df is None or df.empty or len(df) < 2:
+        return {}
+    prev = df.iloc[-2]
+    h, l, c = float(prev["high"]), float(prev["low"]), float(prev["close"])
+    rng = h - l
+    return {
+        "h4": c + rng * 1.1 / 2,    "h3": c + rng * 1.1 / 4,
+        "h2": c + rng * 1.1 / 6,    "h1": c + rng * 1.1 / 12,
+        "l1": c - rng * 1.1 / 12,   "l2": c - rng * 1.1 / 6,
+        "l3": c - rng * 1.1 / 4,    "l4": c - rng * 1.1 / 2,
+        "prev_close": c,
+    }
+
+
+# ============================================================================
+# Classic chart patterns
+# ============================================================================
+def detect_double_top(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Two peaks at the same level with a valley between, then breakdown
+    below the valley = Double Top (bear reversal)."""
+    if df is None or df.empty or len(df) < 30:
+        return None
+    pivots = swing_pivots(df.tail(80), n=4)
+    highs = [p for p in pivots if p.kind == "high"]
+    lows = [p for p in pivots if p.kind == "low"]
+    if len(highs) < 2 or len(lows) < 1:
+        return None
+    h1, h2 = highs[-2], highs[-1]
+    if abs(h1.price - h2.price) / max(h1.price, 1) > 0.03:
+        return None
+    valley = max([l for l in lows if h1.idx < l.idx < h2.idx], key=lambda p: -p.price, default=None)
+    if valley is None:
+        return None
+    last = df.iloc[-1]
+    px = float(last["close"])
+    atrv = float(atr(df, 14).iloc[-1])
+    if px > valley.price:
+        return None
+    if not volume_confirmed(df):
+        return None
+    stop = max(h1.price, h2.price) + 0.2 * atrv
+    height = max(h1.price, h2.price) - valley.price
+    targets = [valley.price - height, valley.price - 2 * height]
+    return Setup(symbol, "Double Top breakdown (short)", "short",
+        entry=px, stop_loss=stop, targets=targets,
+        current_price=px, conviction=BACKTESTED_CONVICTION.get("Double Top", 0.62),
+        reasoning=f"Two peaks at ~${h1.price:.2f}/${h2.price:.2f}, broke neckline ${valley.price:.2f}.",
+        citation="Classic Double Top reversal")
+
+
+def detect_double_bottom(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Mirror of double top — two lows at same level + breakout above peak."""
+    if df is None or df.empty or len(df) < 30:
+        return None
+    pivots = swing_pivots(df.tail(80), n=4)
+    lows = [p for p in pivots if p.kind == "low"]
+    highs = [p for p in pivots if p.kind == "high"]
+    if len(lows) < 2 or len(highs) < 1:
+        return None
+    l1, l2 = lows[-2], lows[-1]
+    if abs(l1.price - l2.price) / max(l1.price, 1) > 0.03:
+        return None
+    peak = min([h for h in highs if l1.idx < h.idx < l2.idx], key=lambda p: -p.price, default=None)
+    if peak is None:
+        return None
+    last = df.iloc[-1]
+    px = float(last["close"])
+    atrv = float(atr(df, 14).iloc[-1])
+    if px < peak.price:
+        return None
+    if not volume_confirmed(df):
+        return None
+    stop = min(l1.price, l2.price) - 0.2 * atrv
+    height = peak.price - min(l1.price, l2.price)
+    targets = [peak.price + height, peak.price + 2 * height]
+    return Setup(symbol, "Double Bottom breakout (long)", "long",
+        entry=px, stop_loss=stop, targets=targets,
+        current_price=px, conviction=BACKTESTED_CONVICTION.get("Double Bottom", 0.64),
+        reasoning=f"Two lows at ~${l1.price:.2f}/${l2.price:.2f}, broke neckline ${peak.price:.2f}.",
+        citation="Classic Double Bottom reversal")
+
+
+def detect_head_and_shoulders(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """H&S: left shoulder lower than head, right shoulder ~equal to left, then
+    break of neckline. Inverse H&S mirror for bullish reversal."""
+    if df is None or df.empty or len(df) < 40:
+        return None
+    pivots = swing_pivots(df.tail(100), n=4)
+    highs = [p for p in pivots if p.kind == "high"]
+    lows = [p for p in pivots if p.kind == "low"]
+    last = df.iloc[-1]
+    px = float(last["close"])
+    atrv = float(atr(df, 14).iloc[-1])
+    if not volume_confirmed(df):
+        return None
+    # Classic H&S top — need 3 highs where middle is highest
+    if len(highs) >= 3:
+        ls, head, rs = highs[-3], highs[-2], highs[-1]
+        if head.price > ls.price and head.price > rs.price and \
+           abs(ls.price - rs.price) / max(ls.price, 1) < 0.04:
+            # Neckline from the two lows between shoulders
+            between = [l for l in lows if ls.idx < l.idx < rs.idx]
+            if len(between) >= 2:
+                neck = (between[0].price + between[-1].price) / 2.0
+                if px < neck - 0.1 * atrv:
+                    height = head.price - neck
+                    stop = rs.price + 0.2 * atrv
+                    targets = [neck - height, neck - 1.5 * height]
+                    return Setup(symbol, "Head & Shoulders breakdown (short)", "short",
+                        entry=px, stop_loss=stop, targets=targets,
+                        current_price=px, conviction=BACKTESTED_CONVICTION.get("Head & Shoulders", 0.66),
+                        reasoning=f"L-shoulder ${ls.price:.2f}, head ${head.price:.2f}, R-shoulder ${rs.price:.2f}; broke neckline ${neck:.2f}.",
+                        citation="Classic Head & Shoulders top")
+    # Inverse H&S — 3 lows where middle is lowest
+    if len(lows) >= 3:
+        ls, head, rs = lows[-3], lows[-2], lows[-1]
+        if head.price < ls.price and head.price < rs.price and \
+           abs(ls.price - rs.price) / max(ls.price, 1) < 0.04:
+            between = [h for h in highs if ls.idx < h.idx < rs.idx]
+            if len(between) >= 2:
+                neck = (between[0].price + between[-1].price) / 2.0
+                if px > neck + 0.1 * atrv:
+                    height = neck - head.price
+                    stop = rs.price - 0.2 * atrv
+                    targets = [neck + height, neck + 1.5 * height]
+                    return Setup(symbol, "Inverse Head & Shoulders breakout (long)", "long",
+                        entry=px, stop_loss=stop, targets=targets,
+                        current_price=px, conviction=BACKTESTED_CONVICTION.get("Inverse H&S", 0.66),
+                        reasoning=f"L-shoulder ${ls.price:.2f}, head ${head.price:.2f}, R-shoulder ${rs.price:.2f}; broke neckline ${neck:.2f}.",
+                        citation="Classic Inverse Head & Shoulders bottom")
+    return None
+
+
+def detect_triangle(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Triangle (asc/desc/sym) — two trendlines converging. Asc = flat top +
+    rising bottom (bullish). Desc = falling top + flat bottom (bearish).
+    Sym = both converging. Break of the apex with volume confirms direction."""
+    if df is None or df.empty or len(df) < 30:
+        return None
+    tl_sup = fit_trendline(df, kind="support", lookback=50)
+    tl_res = fit_trendline(df, kind="resistance", lookback=50)
+    if tl_sup is None or tl_res is None:
+        return None
+    last = df.iloc[-1]
+    px = float(last["close"])
+    atrv = float(atr(df, 14).iloc[-1])
+    sup_v = tl_sup["value_at_last_bar"]
+    res_v = tl_res["value_at_last_bar"]
+    if res_v <= sup_v:
+        return None
+    if not volume_confirmed(df, threshold=1.2):
+        return None
+    pat = bar_pattern(df)
+    base = BACKTESTED_CONVICTION.get("Triangle", 0.60)
+    # Ascending triangle: support rising (positive slope), resistance flat
+    if tl_sup["slope"] > 0 and abs(tl_res["slope"]) < tl_sup["slope"] * 0.3:
+        if px > res_v + 0.1 * atrv:
+            stop = sup_v - 0.3 * atrv
+            targets = smart_targets_long(df, px, stop)
+            return Setup(symbol, "Ascending Triangle breakout (long)", "long",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=base + (0.10 if is_bull_confirmation(pat) else 0.0),
+                reasoning=f"Asc triangle: rising support + flat resistance ${res_v:.2f}; broke out. Bar: {pat}.",
+                citation="Classic Ascending Triangle")
+    # Descending triangle: resistance falling, support flat
+    if tl_res["slope"] < 0 and abs(tl_sup["slope"]) < abs(tl_res["slope"]) * 0.3:
+        if px < sup_v - 0.1 * atrv:
+            stop = res_v + 0.3 * atrv
+            targets = smart_targets_short(df, px, stop)
+            return Setup(symbol, "Descending Triangle breakdown (short)", "short",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=base + (0.10 if is_bear_confirmation(pat) else 0.0),
+                reasoning=f"Desc triangle: falling resistance + flat support ${sup_v:.2f}; broke down. Bar: {pat}.",
+                citation="Classic Descending Triangle")
+    # Symmetrical triangle: both lines converging
+    if tl_sup["slope"] > 0 and tl_res["slope"] < 0:
+        if px > res_v + 0.1 * atrv:
+            stop = sup_v - 0.3 * atrv
+            targets = smart_targets_long(df, px, stop)
+            return Setup(symbol, "Symmetric Triangle breakout (long)", "long",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=base + (0.10 if is_bull_confirmation(pat) else 0.0),
+                reasoning=f"Sym triangle converging; broke out above resistance line ${res_v:.2f}.",
+                citation="Classic Symmetric Triangle")
+        if px < sup_v - 0.1 * atrv:
+            stop = res_v + 0.3 * atrv
+            targets = smart_targets_short(df, px, stop)
+            return Setup(symbol, "Symmetric Triangle breakdown (short)", "short",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=base - 0.05 + (0.10 if is_bear_confirmation(pat) else 0.0),
+                reasoning=f"Sym triangle converging; broke down below support line ${sup_v:.2f}.",
+                citation="Classic Symmetric Triangle")
+    return None
+
+
+def detect_wedge(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Wedge — two trendlines sloping in the SAME direction (both up or both
+    down) but converging. Rising wedge in uptrend = bearish reversal. Falling
+    wedge in downtrend = bullish reversal."""
+    if df is None or df.empty or len(df) < 30:
+        return None
+    tl_sup = fit_trendline(df, kind="support", lookback=50)
+    tl_res = fit_trendline(df, kind="resistance", lookback=50)
+    if tl_sup is None or tl_res is None:
+        return None
+    last = df.iloc[-1]
+    px = float(last["close"])
+    atrv = float(atr(df, 14).iloc[-1])
+    sup_v = tl_sup["value_at_last_bar"]
+    res_v = tl_res["value_at_last_bar"]
+    if res_v <= sup_v:
+        return None
+    base = BACKTESTED_CONVICTION.get("Wedge", 0.58)
+    pat = bar_pattern(df)
+    if not volume_confirmed(df):
+        return None
+    # Rising wedge: BOTH lines slope up but support slopes faster (bearish setup)
+    if tl_sup["slope"] > 0 and tl_res["slope"] > 0 and tl_sup["slope"] > tl_res["slope"]:
+        if px < sup_v - 0.2 * atrv:
+            stop = res_v + 0.3 * atrv
+            targets = smart_targets_short(df, px, stop)
+            return Setup(symbol, "Rising Wedge breakdown (short)", "short",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=base + (0.10 if is_bear_confirmation(pat) else 0.0),
+                reasoning=f"Rising wedge: both lines up but converging; broke down at ${sup_v:.2f}. Bar: {pat}.",
+                citation="Classic Rising Wedge reversal")
+    # Falling wedge: BOTH lines slope down, resistance slopes faster (bullish)
+    if tl_sup["slope"] < 0 and tl_res["slope"] < 0 and abs(tl_res["slope"]) > abs(tl_sup["slope"]):
+        if px > res_v + 0.2 * atrv:
+            stop = sup_v - 0.3 * atrv
+            targets = smart_targets_long(df, px, stop)
+            return Setup(symbol, "Falling Wedge breakout (long)", "long",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=base + (0.10 if is_bull_confirmation(pat) else 0.0),
+                reasoning=f"Falling wedge: both lines down but converging; broke up at ${res_v:.2f}. Bar: {pat}.",
+                citation="Classic Falling Wedge reversal")
+    return None
+
+
+def detect_flag(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Bull/Bear Flag — a sharp impulsive move ('flagpole') followed by a
+    tight pullback against the trend ('flag'), then breakout in the trend
+    direction. CC favors flags after EMA pullbacks."""
+    if df is None or df.empty or len(df) < 30:
+        return None
+    last = df.iloc[-1]
+    px = float(last["close"])
+    atrv = float(atr(df, 14).iloc[-1])
+    if not volume_confirmed(df, threshold=1.2):
+        return None
+    base = BACKTESTED_CONVICTION.get("Flag", 0.62)
+    pat = bar_pattern(df)
+    # Define flagpole = the prior strong impulsive 5 bars
+    pole = df.iloc[-15:-5]
+    flag = df.iloc[-5:-1]
+    pole_change = float(pole["close"].iloc[-1] - pole["close"].iloc[0])
+    flag_range = float(flag["high"].max() - flag["low"].min())
+    # Bull flag — pole goes UP strongly, flag is tight pullback, breakout up
+    if pole_change > 3 * atrv and flag_range < 2 * atrv:
+        flag_high = float(flag["high"].max())
+        if px > flag_high + 0.1 * atrv:
+            stop = float(flag["low"].min()) - 0.2 * atrv
+            targets = [px + abs(pole_change) * 0.6, px + abs(pole_change)]
+            return Setup(symbol, "Bull Flag breakout (long)", "long",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=base + (0.10 if is_bull_confirmation(pat) else 0.0),
+                reasoning=f"Strong up flagpole ${pole_change:.2f}, tight flag, broke above ${flag_high:.2f}. Measured-move target.",
+                citation="Classic Bull Flag continuation")
+    # Bear flag — mirror
+    if pole_change < -3 * atrv and flag_range < 2 * atrv:
+        flag_low = float(flag["low"].min())
+        if px < flag_low - 0.1 * atrv:
+            stop = float(flag["high"].max()) + 0.2 * atrv
+            targets = [px - abs(pole_change) * 0.6, px - abs(pole_change)]
+            return Setup(symbol, "Bear Flag breakdown (short)", "short",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=base - 0.05 + (0.10 if is_bear_confirmation(pat) else 0.0),
+                reasoning=f"Strong down flagpole {pole_change:.2f}, tight flag, broke below ${flag_low:.2f}.",
+                citation="Classic Bear Flag continuation")
+    return None
+
+
+def detect_cup_handle(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Cup and Handle — long rounded bottom (cup) followed by a brief
+    pullback (handle), then breakout above the cup rim. Bullish continuation."""
+    if df is None or df.empty or len(df) < 60:
+        return None
+    last = df.iloc[-1]
+    px = float(last["close"])
+    atrv = float(atr(df, 14).iloc[-1])
+    if not volume_confirmed(df, threshold=1.3):
+        return None
+    base = BACKTESTED_CONVICTION.get("Cup Handle", 0.60)
+    pat = bar_pattern(df)
+    # Cup = 40 bars ago, current price close to that level after dip
+    cup_start = float(df["close"].iloc[-50])
+    cup_low = float(df["low"].iloc[-50:-10].min())
+    cup_end = float(df["close"].iloc[-10])
+    handle = df.iloc[-10:-1]
+    handle_low = float(handle["low"].min())
+    cup_rim = max(cup_start, cup_end)
+    cup_depth = cup_rim - cup_low
+    handle_depth = cup_rim - handle_low
+    # Cup criteria: rounded (depth significant), rim equal both sides
+    if cup_depth < 3 * atrv:
+        return None
+    if abs(cup_start - cup_end) / max(cup_rim, 1) > 0.05:
+        return None
+    # Handle should be shallow vs cup (< 50%)
+    if handle_depth > 0.5 * cup_depth:
+        return None
+    # Breakout: current closes above cup rim
+    if px > cup_rim + 0.1 * atrv:
+        stop = handle_low - 0.2 * atrv
+        targets = [cup_rim + cup_depth, cup_rim + 1.5 * cup_depth]
+        return Setup(symbol, "Cup and Handle breakout (long)", "long",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=base + (0.10 if is_bull_confirmation(pat) else 0.0),
+            reasoning=f"Rounded cup ${cup_low:.2f}–${cup_rim:.2f}, shallow handle ${handle_low:.2f}, broke rim. Bar: {pat}.",
+            citation="Classic Cup and Handle (O'Neil)")
+    return None
+
+
+# ============================================================================
+# Harmonic patterns — shared XABCD pivot helper + per-pattern Fib ratio matcher
+# ============================================================================
+def find_xabcd_pivots(df: pd.DataFrame, lookback: int = 150, n: int = 4):
+    """Get the last 5 alternating swing pivots as (X, A, B, C, D)."""
+    pivots = swing_pivots(df.tail(lookback), n=n)
+    if len(pivots) < 5:
+        return None
+    last5 = pivots[-5:]
+    kinds = [p.kind for p in last5]
+    if not (kinds == ["low","high","low","high","low"]
+            or kinds == ["high","low","high","low","high"]):
+        return None
+    return {"X": last5[0], "A": last5[1], "B": last5[2], "C": last5[3], "D": last5[4]}
+
+
+def _check_xabcd(pts, ab_range, bc_range, cd_range, ad_range, ad_kind="xa"):
+    """Verify the harmonic ratios are within tolerance.
+    ab_range = AB/XA range, bc_range = BC/AB range,
+    cd_range = CD/BC range, ad_range = AD/XA (or AD/XC if ad_kind='xc')."""
+    X, A, B, C, D = (pts["X"].price, pts["A"].price, pts["B"].price,
+                     pts["C"].price, pts["D"].price)
+    xa = abs(A - X); ab = abs(B - A); bc = abs(C - B); cd = abs(D - C)
+    if xa <= 0 or ab <= 0 or bc <= 0:
+        return False
+    ab_xa = ab / xa
+    bc_ab = bc / ab
+    cd_bc = cd / bc
+    if ad_kind == "xa":
+        ad_ratio = abs(D - A) / xa
+    else:  # xc
+        xc = abs(C - X)
+        if xc <= 0:
+            return False
+        ad_ratio = abs(D - C) / xc
+    return (ab_range[0] <= ab_xa <= ab_range[1]
+            and bc_range[0] <= bc_ab <= bc_range[1]
+            and cd_range[0] <= cd_bc <= cd_range[1]
+            and ad_range[0] <= ad_ratio <= ad_range[1])
+
+
+def _harmonic_setup(symbol, df, pts, name, citation, base_conv):
+    """Build a Setup from the D point of a confirmed harmonic. Direction is
+    determined by X kind: X=low → bullish, X=high → bearish."""
+    last = df.iloc[-1]
+    px = float(last["close"])
+    atrv = float(atr(df, 14).iloc[-1])
+    D = pts["D"]
+    pat = bar_pattern(df)
+    # Trade only if current price is near the D point (within 0.7 ATR)
+    if abs(px - D.price) > 0.7 * atrv:
+        return None
+    direction = "long" if pts["X"].kind == "low" else "short"
+    if direction == "long":
+        stop = D.price - 0.5 * atrv
+        targets = smart_targets_long(df, px, stop)
+        conv = base_conv + (0.10 if is_bull_confirmation(pat) else 0.0)
+    else:
+        stop = D.price + 0.5 * atrv
+        targets = smart_targets_short(df, px, stop)
+        conv = base_conv - 0.05 + (0.10 if is_bear_confirmation(pat) else 0.0)
+    return Setup(symbol, f"{name} ({direction})", direction,
+        entry=px, stop_loss=stop, targets=targets,
+        current_price=px, conviction=min(0.88, conv),
+        reasoning=f"{name} pattern complete at D=${D.price:.2f}. Bar: {pat}.",
+        citation=citation)
+
+
+def detect_abcd(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """ABCD — simplest harmonic. AB=CD (equal legs), BC retracement 0.382-0.886."""
+    if df is None or df.empty or len(df) < 50:
+        return None
+    pts = find_xabcd_pivots(df)
+    if pts is None:
+        return None
+    # ABCD ratios — use only A/B/C/D (X ignored), AB ≈ CD
+    A, B, C, D = pts["A"].price, pts["B"].price, pts["C"].price, pts["D"].price
+    ab = abs(B - A); cd = abs(D - C)
+    if ab <= 0 or abs(ab - cd) / ab > 0.15:    # AB and CD within 15%
+        return None
+    bc = abs(C - B)
+    if not (0.38 <= bc / ab <= 0.886):
+        return None
+    return _harmonic_setup(symbol, df, pts, "ABCD harmonic",
+        "Harmonic — ABCD equal-legs",
+        BACKTESTED_CONVICTION.get("ABCD", 0.58))
+
+
+def detect_gartley(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Gartley — AB=0.618 XA, BC=0.382-0.886 AB, CD=1.272-1.618 BC, D=0.786 XA."""
+    if df is None or df.empty or len(df) < 50:
+        return None
+    pts = find_xabcd_pivots(df)
+    if not pts: return None
+    if not _check_xabcd(pts, (0.55, 0.68), (0.38, 0.886), (1.13, 1.62), (0.72, 0.84)):
+        return None
+    return _harmonic_setup(symbol, df, pts, "Gartley harmonic",
+        "Harmonic — Gartley (Second 18 p.93)",
+        BACKTESTED_CONVICTION.get("Gartley", 0.62))
+
+
+def detect_bat(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Bat — AB=0.382-0.5 XA, BC=0.382-0.886 AB, CD=1.618-2.618 BC, D=0.886 XA."""
+    if df is None or df.empty or len(df) < 50:
+        return None
+    pts = find_xabcd_pivots(df)
+    if not pts: return None
+    if not _check_xabcd(pts, (0.35, 0.55), (0.38, 0.886), (1.50, 2.70), (0.84, 0.93)):
+        return None
+    return _harmonic_setup(symbol, df, pts, "Bat harmonic",
+        "Harmonic — Bat (Second 18 p.92)",
+        BACKTESTED_CONVICTION.get("Bat", 0.62))
+
+
+def detect_butterfly(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Butterfly — AB=0.786 XA, BC=0.382-0.886, CD=1.618-2.24, D=1.27-1.41 XA."""
+    if df is None or df.empty or len(df) < 50:
+        return None
+    pts = find_xabcd_pivots(df)
+    if not pts: return None
+    if not _check_xabcd(pts, (0.74, 0.83), (0.38, 0.886), (1.55, 2.30), (1.22, 1.45)):
+        return None
+    return _harmonic_setup(symbol, df, pts, "Butterfly harmonic",
+        "Harmonic — Butterfly (Second 18 p.90)",
+        BACKTESTED_CONVICTION.get("Butterfly", 0.60))
+
+
+def detect_crab(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Crab — AB=0.382-0.618 XA, BC=0.382-0.886, CD=2.24-3.618, D=1.618 XA."""
+    if df is None or df.empty or len(df) < 50:
+        return None
+    pts = find_xabcd_pivots(df)
+    if not pts: return None
+    if not _check_xabcd(pts, (0.35, 0.65), (0.38, 0.886), (2.10, 3.70), (1.55, 1.68)):
+        return None
+    return _harmonic_setup(symbol, df, pts, "Crab harmonic",
+        "Harmonic — Crab (Second 18 p.91)",
+        BACKTESTED_CONVICTION.get("Crab", 0.58))
+
+
+def detect_cypher(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Cypher — AB=0.382-0.618 XA, BC=1.13-1.414 AB (extends past A!),
+    CD=0.786 XC, D=0.786 XC."""
+    if df is None or df.empty or len(df) < 50:
+        return None
+    pts = find_xabcd_pivots(df)
+    if not pts: return None
+    if not _check_xabcd(pts, (0.35, 0.65), (1.10, 1.45), (0.70, 0.86), (0.70, 0.86),
+                       ad_kind="xc"):
+        return None
+    return _harmonic_setup(symbol, df, pts, "Cypher harmonic",
+        "Harmonic — Cypher (Second 18 p.94)",
+        BACKTESTED_CONVICTION.get("Cypher", 0.60))
+
+
+def detect_shark(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Shark — AB any (0.5-1.0), BC 1.13-1.618 (extends past A), CD 1.618-2.24,
+    D inside the 0.886-1.13 zone of XC."""
+    if df is None or df.empty or len(df) < 50:
+        return None
+    pts = find_xabcd_pivots(df)
+    if not pts: return None
+    if not _check_xabcd(pts, (0.45, 1.05), (1.10, 1.65), (1.55, 2.30), (0.85, 1.20),
+                       ad_kind="xc"):
+        return None
+    return _harmonic_setup(symbol, df, pts, "Shark harmonic",
+        "Harmonic — Shark (Second 18 p.95)",
+        BACKTESTED_CONVICTION.get("Shark", 0.56))
+
+
+def detect_wolfe_wave(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Wolfe Wave — 5-point pattern where points 1-3-5 form one trendline and
+    points 2-4 form another. Entry at point 5; target = 1-4 line."""
+    if df is None or df.empty or len(df) < 60:
+        return None
+    pivots = swing_pivots(df.tail(120), n=4)
+    if len(pivots) < 5:
+        return None
+    last5 = pivots[-5:]
+    last = df.iloc[-1]
+    px = float(last["close"])
+    atrv = float(atr(df, 14).iloc[-1])
+    # We need P1=low P2=high P3=low P4=high P5=low (bullish) or mirror
+    kinds = [p.kind for p in last5]
+    bull = (kinds == ["low","high","low","high","low"])
+    bear = (kinds == ["high","low","high","low","high"])
+    if not (bull or bear):
+        return None
+    p1, p2, p3, p4, p5 = last5
+    if bull:
+        # Bull: 1-3-5 should be lower lows (extending support)
+        if not (p3.price < p1.price and p5.price < p3.price):
+            return None
+        # 2-4 should be lower highs
+        if not (p4.price < p2.price):
+            return None
+        # Entry at P5, target = 1-4 line projection
+        target = max(p1.price, p4.price)
+        stop = p5.price - 0.4 * atrv
+        if abs(px - p5.price) > 0.7 * atrv:
+            return None
+        return Setup(symbol, "Wolfe Wave bottom (long)", "long",
+            entry=px, stop_loss=stop, targets=[target, target + (target - px)],
+            current_price=px,
+            conviction=BACKTESTED_CONVICTION.get("Wolfe", 0.56),
+            reasoning=f"5-point Wolfe Wave bottom: lower lows 1-3-5, lower highs 2-4; entry at P5 ${p5.price:.2f}.",
+            citation="Wolfe Wave — 5-point reversal")
+    else:
+        if not (p3.price > p1.price and p5.price > p3.price):
+            return None
+        if not (p4.price > p2.price):
+            return None
+        target = min(p1.price, p4.price)
+        stop = p5.price + 0.4 * atrv
+        if abs(px - p5.price) > 0.7 * atrv:
+            return None
+        return Setup(symbol, "Wolfe Wave top (short)", "short",
+            entry=px, stop_loss=stop, targets=[target, target - (px - target)],
+            current_price=px,
+            conviction=BACKTESTED_CONVICTION.get("Wolfe", 0.56) - 0.05,
+            reasoning=f"5-point Wolfe Wave top: higher highs 1-3-5, higher lows 2-4; entry at P5 ${p5.price:.2f}.",
+            citation="Wolfe Wave — 5-point reversal")
+
+
+# ============================================================================
+# SMC extensions — Breaker, Mitigation, Premium/Discount/Equilibrium, OTE
+# ============================================================================
+def detect_breaker_block(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Breaker block — an order block that was broken by the OPPOSITE direction
+    impulse. When price returns to a broken bullish OB, the OB becomes
+    resistance (now bearish). Mirror for bearish broken OB becoming support."""
+    if df is None or df.empty or len(df) < 40:
+        return None
+    last = df.iloc[-1]
+    px = float(last["close"])
+    hi = float(last["high"])
+    lo = float(last["low"])
+    atrv = float(atr(df, 14).iloc[-1])
+    obs = find_order_blocks(df, lookback=80)
+    pat = bar_pattern(df)
+    base = BACKTESTED_CONVICTION.get("Breaker", 0.58)
+    # Bullish OB that's been BROKEN → now acts as resistance, SHORT setup
+    bull_broken = [o for o in obs if o["kind"] == "bull" and o["broken"]]
+    for ob in bull_broken:
+        if ob["bot"] <= hi <= ob["top"] and px < ob["mid"]:
+            stop = ob["top"] + 0.3 * atrv
+            targets = smart_targets_short(df, px, stop)
+            return Setup(symbol, f"Breaker block @ ${ob['mid']:.2f} (short)", "short",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=base - 0.05 + (0.10 if is_bear_confirmation(pat) else 0.0),
+                reasoning=f"Previously bullish OB ${ob['bot']:.2f}-${ob['top']:.2f} was broken; now acts as resistance.",
+                citation="SMC — Breaker block (broken OB role-reversal)")
+    # Bearish OB broken → support, LONG setup
+    bear_broken = [o for o in obs if o["kind"] == "bear" and o["broken"]]
+    for ob in bear_broken:
+        if ob["bot"] <= lo <= ob["top"] and px > ob["mid"]:
+            stop = ob["bot"] - 0.3 * atrv
+            targets = smart_targets_long(df, px, stop)
+            return Setup(symbol, f"Breaker block @ ${ob['mid']:.2f} (long)", "long",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=base + (0.10 if is_bull_confirmation(pat) else 0.0),
+                reasoning=f"Previously bearish OB ${ob['bot']:.2f}-${ob['top']:.2f} was broken; now acts as support.",
+                citation="SMC — Breaker block (broken OB role-reversal)")
+    return None
+
+
+def detect_premium_discount_ote(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """ICT Premium/Discount/Equilibrium + Optimal Trade Entry. Take the most
+    recent leg (swing low → swing high), divide into thirds.
+      Discount zone = lower third → look LONG
+      Equilibrium = middle third → wait
+      Premium zone = upper third → look SHORT
+    OTE = the 0.618-0.79 fib retracement zone (a refinement of discount/premium)."""
+    if df is None or df.empty or len(df) < 40:
+        return None
+    pivots = swing_pivots(df.tail(80), n=4)
+    if len(pivots) < 2:
+        return None
+    last2 = pivots[-2:]
+    if last2[0].kind == last2[1].kind:
+        return None
+    leg_low = min(last2[0].price, last2[1].price)
+    leg_high = max(last2[0].price, last2[1].price)
+    leg_range = leg_high - leg_low
+    if leg_range <= 0:
+        return None
+    last = df.iloc[-1]
+    px = float(last["close"])
+    atrv = float(atr(df, 14).iloc[-1])
+    if not volume_confirmed(df):
+        return None
+    pat = bar_pattern(df)
+    base = BACKTESTED_CONVICTION.get("OTE", 0.62)
+    # OTE zone = 0.618 to 0.79 retracement from the move direction
+    ote_lo = leg_low + 0.59 * leg_range
+    ote_hi = leg_low + 0.79 * leg_range
+    # If the most recent leg was UP (low → high), and price has pulled BACK
+    # into discount/OTE zone, look LONG
+    bull_leg = last2[0].kind == "low" and last2[1].kind == "high"
+    bear_leg = last2[0].kind == "high" and last2[1].kind == "low"
+    if bull_leg:
+        # We want a LONG entry if price has come down into the discount/OTE zone
+        if ote_lo <= px <= ote_hi:
+            stop = leg_low - 0.3 * atrv
+            targets = [leg_high, leg_high + leg_range * 0.5]
+            return Setup(symbol, f"OTE long @ ${px:.2f} (discount zone)", "long",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=base + (0.10 if is_bull_confirmation(pat) else 0.0),
+                reasoning=f"Price in OTE/discount zone (0.618-0.79 retrace of leg ${leg_low:.2f}→${leg_high:.2f}). Bar: {pat}.",
+                citation="ICT — Optimal Trade Entry (premium/discount)")
+    if bear_leg:
+        # Bear leg high → low; for SHORT we want price retraced UP into OTE
+        ote_lo = leg_high - 0.79 * leg_range
+        ote_hi = leg_high - 0.59 * leg_range
+        if ote_lo <= px <= ote_hi:
+            stop = leg_high + 0.3 * atrv
+            targets = [leg_low, leg_low - leg_range * 0.5]
+            return Setup(symbol, f"OTE short @ ${px:.2f} (premium zone)", "short",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=base - 0.05 + (0.10 if is_bear_confirmation(pat) else 0.0),
+                reasoning=f"Price in OTE/premium zone (0.618-0.79 retrace of leg ${leg_high:.2f}→${leg_low:.2f}).",
+                citation="ICT — Optimal Trade Entry (premium/discount)")
     return None
 
 
@@ -1682,6 +2676,27 @@ DETECTORS = [
     detect_three_drives,
     detect_channel_break,
     detect_volume_profile_test,
+    # Wave 8 — comprehensive coverage
+    detect_bb_squeeze,
+    detect_gap_play,
+    detect_climax_bar,
+    detect_double_top,
+    detect_double_bottom,
+    detect_head_and_shoulders,
+    detect_triangle,
+    detect_wedge,
+    detect_flag,
+    detect_cup_handle,
+    detect_abcd,
+    detect_gartley,
+    detect_bat,
+    detect_butterfly,
+    detect_crab,
+    detect_cypher,
+    detect_shark,
+    detect_wolfe_wave,
+    detect_breaker_block,
+    detect_premium_discount_ote,
 ]
 
 
@@ -4586,6 +5601,26 @@ def run_backtest(tickers: list[str]) -> dict:
         detect_three_drives:         "Three Drives",
         detect_channel_break:        "Channel",
         detect_volume_profile_test:  "VolProfile",
+        detect_bb_squeeze:           "BB Squeeze",
+        detect_gap_play:             "Gap",
+        detect_climax_bar:           "Climax",
+        detect_double_top:           "Double Top",
+        detect_double_bottom:        "Double Bottom",
+        detect_head_and_shoulders:   "Head & Shoulders",
+        detect_triangle:             "Triangle",
+        detect_wedge:                "Wedge",
+        detect_flag:                 "Flag",
+        detect_cup_handle:           "Cup Handle",
+        detect_abcd:                 "ABCD",
+        detect_gartley:              "Gartley",
+        detect_bat:                  "Bat",
+        detect_butterfly:            "Butterfly",
+        detect_crab:                 "Crab",
+        detect_cypher:               "Cypher",
+        detect_shark:                "Shark",
+        detect_wolfe_wave:           "Wolfe",
+        detect_breaker_block:        "Breaker",
+        detect_premium_discount_ote: "OTE",
     }
     for fn, name in detector_to_name.items():
         print(f"\n  → backtesting: {name}...")

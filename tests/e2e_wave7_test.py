@@ -211,7 +211,7 @@ check("prompt demands JSON output",  "JSON" in prompt or "json" in prompt)
 # 8. Regression — earlier features still intact
 # ---------------------------------------------------------------------------
 print("\n[8] No regressions")
-check("18 detectors still registered", len(cc.DETECTORS) == 18)
+check("at least 18 detectors still registered", len(cc.DETECTORS) >= 18)
 check("Fibonacci ladder helper still works",
       cc.compute_fib_levels.__name__ == "compute_fib_levels")
 check("Multi-timeframe pivots helper still works",

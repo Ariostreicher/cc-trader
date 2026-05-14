@@ -459,8 +459,8 @@ check("Volume profile test detector runs without crashing",
 # 18. DETECTORS list integrity
 # ---------------------------------------------------------------------------
 print("\n[18] DETECTORS list + BACKTESTED_CONVICTION integrity")
-check("DETECTORS has 18 entries (was 6, +12 from Wave 2/3/Bonus)",
-      len(cc.DETECTORS) == 18,
+check("DETECTORS has ≥ 18 entries (was 6, +12 from Wave 2/3/Bonus)",
+      len(cc.DETECTORS) >= 18,
       f"got {len(cc.DETECTORS)}")
 expected_keys = {
     "EMA Pullback","CC Region","S/R Flip","Volume Spike","Inside Day","RSI Reversal",
