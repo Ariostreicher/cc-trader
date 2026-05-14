@@ -4371,6 +4371,7 @@ def render_html(
     return f"""<!doctype html>
 <html><head><meta charset="utf-8">
 <title>CC Trader — Live Setups</title>
+{_favicon_link_tags()}
 <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 <script src="https://s3.tradingview.com/tv.js"></script>
 <style>
@@ -4389,6 +4390,16 @@ def render_html(
   .ticker-block {{ background:#0f172a; border-radius:12px; padding:16px; margin-top:18px; }}
   .chart-row {{ display:grid; grid-template-columns: minmax(0, 1fr) 380px; gap:16px; }}
   @media (max-width: 1100px) {{ .chart-row {{ grid-template-columns: 1fr; }} }}
+
+  /* Wave 13 — collapsible sections on main page */
+  .collapsible-section {{ margin-top:18px; background:#0f172a; border:1px solid #1e293b; border-radius:8px; padding:0; }}
+  .collapsible-section > summary {{ padding:14px 18px; cursor:pointer; font-size:15px; font-weight:600; color:#fbbf24; user-select:none; list-style:none; outline:none; }}
+  .collapsible-section > summary::-webkit-details-marker {{ display:none; }}
+  .collapsible-section > summary::before {{ content:'▶ '; display:inline-block; margin-right:6px; font-size:10px; transition: transform 0.2s; }}
+  .collapsible-section[open] > summary::before {{ transform: rotate(90deg); }}
+  .collapsible-section > summary:hover {{ background:#1e293b; }}
+  .collapsible-section > summary .sub {{ color:#64748b; font-weight:400; font-size:12px; margin-left:6px; }}
+  .collapsible-body {{ padding:0 18px 18px 18px; }}
 
   /* Wave 12 — compact ticker cards (chart opens in new tab via /chart?symbol=X) */
   .ticker-compact {{ padding:10px 16px; }}
@@ -4672,18 +4683,31 @@ def render_html(
     <tbody>{table_rows}</tbody>
   </table>
 
-  {monitor_table_html}
-
   {charts_html}
 
-  <div id="manual-section">
-    <h2 style="margin-top:32px">📝 My Manual Setups <span class="sub" id="manual-count">(empty)</span></h2>
-    <div id="manual-cards"></div>
-  </div>
+  <details class="collapsible-section">
+    <summary>📡 Watchlist Monitor <span class="sub" id="monitor-count-summary">(click to expand)</span></summary>
+    <div class="collapsible-body">{monitor_table_html}</div>
+  </details>
 
-  {watching_html}
+  <details class="collapsible-section">
+    <summary>📝 My Manual Setups <span class="sub" id="manual-count">(click to expand)</span></summary>
+    <div class="collapsible-body">
+      <div id="manual-section">
+        <div id="manual-cards"></div>
+      </div>
+    </div>
+  </details>
 
-  {snapshots_html}
+  <details class="collapsible-section">
+    <summary>👁 Forming Setups <span class="sub">(click to expand)</span></summary>
+    <div class="collapsible-body">{watching_html}</div>
+  </details>
+
+  <details class="collapsible-section">
+    <summary>📊 All Tickers Overview <span class="sub">(click to expand — Key Levels, Equity Analysis, flags for every watchlist ticker)</span></summary>
+    <div class="collapsible-body">{snapshots_html}</div>
+  </details>
 
   <!-- Manual setup modal -->
   <div id="manual-modal" class="ms-modal" style="display:none">
@@ -4728,6 +4752,9 @@ def render_html(
     </div>
   </div>
 
+  <details class="collapsible-section">
+    <summary>📒 Trade Journal <span class="sub" id="journal-count-summary">(click to expand)</span></summary>
+    <div class="collapsible-body">
   <div class="journal-panel" id="journal-panel">
     <h3>📒 Trade Journal</h3>
     <div class="sub" style="margin:0 0 10px 0">Stored in your browser — survives reloads but not cache wipes. Use the buttons on each setup card to log a trade.</div>
@@ -4737,6 +4764,8 @@ def render_html(
       <button class="tools-btn" style="margin-left:12px" onclick="exportJournal()">⬇ Export CSV</button>
     </div>
   </div>
+    </div>
+  </details>
 
   <div class="footer">
     Methodology source: Chart Champions PDFs uploaded by operator. Run the
@@ -6563,6 +6592,64 @@ def run_full_scan(
     return all_setups, duration, html
 
 
+# ---------------------------------------------------------------------------
+# Wave 13 — favicon + PWA icon (replaces browser's default world icon, also
+# used when adding the app to a phone home screen).
+# Design: dark-navy rounded-square with a rising candlestick chart trend.
+# ---------------------------------------------------------------------------
+LOGO_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <rect width="64" height="64" rx="14" fill="#0a0f1c"/>
+  <!-- Rising trend line behind candles -->
+  <path d="M6 50 L18 38 L30 44 L42 22 L58 12" stroke="#fbbf24" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0.6"/>
+  <!-- Three ascending candles -->
+  <rect x="12" y="30" width="6" height="16" fill="#22c55e" rx="1"/>
+  <line x1="15" y1="25" x2="15" y2="30" stroke="#22c55e" stroke-width="1.5"/>
+  <line x1="15" y1="46" x2="15" y2="50" stroke="#22c55e" stroke-width="1.5"/>
+  <rect x="26" y="22" width="6" height="22" fill="#22c55e" rx="1"/>
+  <line x1="29" y1="18" x2="29" y2="22" stroke="#22c55e" stroke-width="1.5"/>
+  <line x1="29" y1="44" x2="29" y2="46" stroke="#22c55e" stroke-width="1.5"/>
+  <rect x="40" y="12" width="6" height="26" fill="#fbbf24" rx="1"/>
+  <line x1="43" y1="8" x2="43" y2="12" stroke="#fbbf24" stroke-width="1.5"/>
+  <line x1="43" y1="38" x2="43" y2="42" stroke="#fbbf24" stroke-width="1.5"/>
+  <!-- CC monogram in corner -->
+  <text x="58" y="60" text-anchor="end" font-family="Arial Black, sans-serif" font-weight="900" font-size="11" fill="#fbbf24" letter-spacing="-1">CC</text>
+</svg>"""
+
+
+def _favicon_link_tags() -> str:
+    """Return the <link>/<meta> tags to insert in any page's <head> so the
+    browser tab and phone-home-screen icon both use our CC logo, not the
+    default world icon."""
+    return (
+        '<link rel="icon" type="image/svg+xml" href="/icon.svg"/>'
+        '<link rel="apple-touch-icon" href="/icon.svg"/>'
+        '<link rel="manifest" href="/manifest.webmanifest"/>'
+        '<meta name="theme-color" content="#0a0f1c"/>'
+        '<meta name="apple-mobile-web-app-capable" content="yes"/>'
+        '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>'
+        '<meta name="apple-mobile-web-app-title" content="CC Trader"/>'
+    )
+
+
+def _build_manifest_json() -> str:
+    """Return the PWA manifest JSON content for /manifest.webmanifest."""
+    import json as _json
+    return _json.dumps({
+        "name": "CC Trader",
+        "short_name": "CC Trader",
+        "description": "Chart Champions setup scanner — 38 detectors, multi-TF levels, AI commentary, fundamental scoring",
+        "start_url": "/",
+        "scope": "/",
+        "display": "standalone",
+        "orientation": "any",
+        "background_color": "#0a0f1c",
+        "theme_color": "#fbbf24",
+        "icons": [
+            {"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"},
+        ],
+    })
+
+
 def render_single_chart_html(
     symbol: str,
     snap: Optional[Snapshot],
@@ -6748,6 +6835,7 @@ def render_single_chart_html(
     return f"""<!doctype html>
 <html><head><meta charset="utf-8">
 <title>{symbol} · CC Chart</title>
+{_favicon_link_tags()}
 <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 <script src="https://s3.tradingview.com/tv.js"></script>
 <style>
@@ -6838,6 +6926,20 @@ def render_single_chart_html(
   .action-bar button, .action-bar a {{ padding:6px 12px; background:#0a0f1c; color:#94a3b8; border:1px solid #1e293b; border-radius:4px; font-size:11px; cursor:pointer; text-decoration:none; font-family:ui-monospace,monospace; display:inline-flex; align-items:center; gap:4px; }}
   .action-bar button:hover, .action-bar a:hover {{ background:#1e293b; color:#fbbf24; border-color:#fbbf24; }}
   .alarm-toast {{ position:fixed; bottom:24px; right:24px; max-width:380px; background:linear-gradient(135deg,#16a34a,#22c55e); color:#000; padding:14px 18px; border-radius:10px; font-weight:600; box-shadow:0 10px 30px rgba(0,0,0,0.6); z-index:9999; }}
+  /* Wave 13 — hover tooltip on chart lines */
+  .hover-tooltip {{ position:absolute; background:rgba(15,23,42,0.97); border:1px solid #fbbf24; border-radius:6px; padding:8px 12px; font-size:11px; color:#e2e8f0; font-family:ui-monospace,monospace; z-index:10000; pointer-events:none; box-shadow:0 6px 20px rgba(0,0,0,0.6); max-width:340px; line-height:1.6; }}
+  .hover-tooltip > div {{ margin:2px 0; }}
+  /* Wave 13 — My Drawings list */
+  .annotations-list {{ background:#0a0f1c; border:1px dashed #1e293b; border-radius:6px; padding:10px; font-size:11px; }}
+  .anno-row {{ display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid #1e293b; }}
+  .anno-row:last-child {{ border-bottom:0; }}
+  .anno-row .anno-info {{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }}
+  .anno-row .anno-kind {{ color:#fbbf24; font-weight:700; }}
+  .anno-row .anno-price {{ color:#e2e8f0; font-family:ui-monospace,monospace; }}
+  .anno-row .anno-text {{ color:#94a3b8; font-style:italic; }}
+  .anno-row .anno-del {{ background:transparent; border:0; color:#ef4444; cursor:pointer; font-size:14px; padding:2px 6px; }}
+  .anno-row .anno-del:hover {{ color:#fff; background:#ef4444; border-radius:3px; }}
+  .anno-empty {{ color:#64748b; text-align:center; padding:10px; font-style:italic; }}
 </style></head>
 <body>
   <a href="/" class="back-link">← Back to scanner</a>
@@ -6897,6 +6999,10 @@ def render_single_chart_html(
     <div class="side-panel">
       <h3 class="side-h">📐 Key Levels (with distance from current)</h3>
       {key_levels_panel}
+      <h3 class="side-h">✏ My Drawings <span style="font-weight:400;color:#64748b">(saved per ticker)</span></h3>
+      <div id="my-drawings-list" class="annotations-list">
+        <div class="anno-empty">No drawings yet — click ✏ Note or + Line on the chart to add.</div>
+      </div>
       {('<h3 class="side-h">🚦 Context Flags</h3>' + '<div class="setup-card">' + flags_panel + '</div>') if flags_panel else ''}
       {('<h3 class="side-h">🎯 Fired Setup</h3>' + setup_panel) if setup_panel else ''}
       {watch_panel}
@@ -6952,12 +7058,41 @@ def render_single_chart_html(
       arr.push({{id: Date.now(), kind: kind, price: price, text: text, color: color}});
       saveAnnotations(sym, arr);
       applyAnnotations(sym, chartId);
+      renderDrawingsList(sym, chartId);
       showToast('✏ Added ' + (kind === 'note' ? 'note' : 'line') + ' at $' + price.toFixed(2));
     }}
     function clearAnnotations(sym, chartId) {{
       if (!confirm('Remove ALL your drawings for ' + sym + '?')) return;
       saveAnnotations(sym, []);
       applyAnnotations(sym, chartId);
+      renderDrawingsList(sym, chartId);
+    }}
+    function deleteAnnotation(sym, chartId, annoId) {{
+      var arr = getAnnotations(sym).filter(function(a) {{ return a.id !== annoId; }});
+      saveAnnotations(sym, arr);
+      applyAnnotations(sym, chartId);
+      renderDrawingsList(sym, chartId);
+    }}
+    function renderDrawingsList(sym, chartId) {{
+      var listEl = document.getElementById('my-drawings-list');
+      if (!listEl) return;
+      var arr = getAnnotations(sym);
+      if (!arr.length) {{
+        listEl.innerHTML = '<div class="anno-empty">No drawings yet — click ✏ Note or + Line on the chart to add.</div>';
+        return;
+      }}
+      listEl.innerHTML = arr.map(function(a) {{
+        var icon = a.kind === 'note' ? '✏' : '─';
+        var textBlock = a.text ? '<span class="anno-text">"' + a.text + '"</span>' : '';
+        return '<div class="anno-row">'
+          + '<div class="anno-info">'
+          + '<span class="anno-kind">' + icon + ' ' + (a.kind === 'note' ? 'Note' : 'Line') + '</span>'
+          + '<span class="anno-price">$' + a.price.toFixed(2) + '</span>'
+          + textBlock
+          + '</div>'
+          + '<button class="anno-del" onclick="deleteAnnotation(\\'' + sym + '\\', \\'' + chartId + '\\', ' + a.id + ')" title="Delete this drawing">✕</button>'
+          + '</div>';
+      }}).join('');
     }}
     function applyAnnotations(sym, chartId) {{
       var h = window.cc_chart_handles['lwc_' + chartId];
@@ -7144,6 +7279,71 @@ def render_single_chart_html(
       chart.timeScale().fitContent();
       new ResizeObserver(function() {{ chart.applyOptions({{ width: div.clientWidth, height: div.clientHeight }}); }}).observe(div);
 
+      // -------- Hover tooltips on chart lines (Wave 13) ----------------
+      // When mouse moves over the chart, find any price lines near the
+      // crosshair price and show a floating tooltip with their titles.
+      var tooltipEl = document.getElementById('chart-tooltip');
+      if (!tooltipEl) {{
+        tooltipEl = document.createElement('div');
+        tooltipEl.id = 'chart-tooltip';
+        tooltipEl.className = 'hover-tooltip';
+        tooltipEl.style.display = 'none';
+        document.body.appendChild(tooltipEl);
+      }}
+      chart.subscribeCrosshairMove(function(param) {{
+        if (!param.point || !param.time || !param.seriesPrices) {{
+          tooltipEl.style.display = 'none';
+          return;
+        }}
+        // Get the price at crosshair Y position
+        var px = candleSeries.coordinateToPrice(param.point.y);
+        if (px === null || isNaN(px)) {{
+          tooltipEl.style.display = 'none';
+          return;
+        }}
+        // Tolerance: 0.4% of the price
+        var tol = Math.abs(px) * 0.004;
+        var matches = lines.filter(function(l) {{ return Math.abs(l.price - px) <= tol; }});
+        // Also include EMA values near crosshair via the seriesPrices map
+        var seriesAt = param.seriesPrices;
+        if (seriesAt && typeof seriesAt.forEach === 'function') {{
+          seriesAt.forEach(function(val, series) {{
+            try {{
+              if (typeof val === 'number' && Math.abs(val - px) <= tol) {{
+                // EMA series — find its title from emaSeries map
+                Object.keys(emaSeries).forEach(function(k) {{
+                  if (emaSeries[k] === series) {{
+                    matches.push({{title: k.replace('_', ' ').toUpperCase() + ' $' + val.toFixed(2), color: '#94a3b8'}});
+                  }}
+                }});
+              }}
+            }} catch(_) {{}}
+          }});
+        }}
+        if (matches.length === 0) {{
+          tooltipEl.style.display = 'none';
+          return;
+        }}
+        // Build tooltip content
+        tooltipEl.innerHTML = matches.map(function(m) {{
+          var dist = ((m.price - px) / px * 100);
+          var distStr = isNaN(dist) ? '' : ' <span style="color:#64748b">(' + (dist >= 0 ? '+' : '') + dist.toFixed(2) + '%)</span>';
+          return '<div style="border-left:3px solid ' + (m.color || '#fbbf24') + ';padding-left:6px">'
+               + (m.title || '') + distStr + '</div>';
+        }}).join('');
+        tooltipEl.style.display = 'block';
+        // Position tooltip near the cursor but inside viewport
+        var rect = div.getBoundingClientRect();
+        var x = rect.left + param.point.x + 14;
+        var y = rect.top + param.point.y + 14;
+        var tw = tooltipEl.offsetWidth;
+        var th = tooltipEl.offsetHeight;
+        if (x + tw > window.innerWidth - 10) x = window.innerWidth - tw - 10;
+        if (y + th > window.innerHeight - 10) y = window.innerHeight - th - 10;
+        tooltipEl.style.left = x + 'px';
+        tooltipEl.style.top = (y + window.scrollY) + 'px';
+      }});
+
       window.cc_chart_handles['lwc_chart_solo'] = {{
         chart: chart, candleSeries: candleSeries, volSeries: volSeries,
         emaSeries: emaSeries, currentTf: defaultTf, rawData: rawData,
@@ -7225,6 +7425,7 @@ def render_single_chart_html(
       var stars = getStars();
       var btn = document.getElementById('star-solo-btn');
       if (btn) btn.textContent = (stars.indexOf('{symbol}') >= 0 ? '⭐' : '☆') + ' Toggle Watchlist';
+      renderDrawingsList('{symbol}', 'chart_solo');
     }});
   </script>
 </body></html>"""
@@ -7348,6 +7549,20 @@ def serve_live(tickers: list[str], port: int, refresh_seconds: int, cache_second
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(html.encode("utf-8"))
+            elif parsed.path in ("/icon.svg", "/favicon.svg", "/favicon.ico", "/apple-touch-icon.png"):
+                # Wave 13 — serve the CC logo as favicon + apple-touch-icon
+                self.send_response(200)
+                self.send_header("Content-Type", "image/svg+xml")
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.end_headers()
+                self.wfile.write(LOGO_SVG.encode("utf-8"))
+            elif parsed.path == "/manifest.webmanifest":
+                # PWA manifest — lets phones add the app to home screen
+                self.send_response(200)
+                self.send_header("Content-Type", "application/manifest+json")
+                self.send_header("Cache-Control", "public, max-age=3600")
+                self.end_headers()
+                self.wfile.write(_build_manifest_json().encode("utf-8"))
             elif parsed.path == "/chart":
                 # Wave 12 — standalone single-ticker chart page
                 sym_q = qs.get("symbol", [""])[0].strip()
