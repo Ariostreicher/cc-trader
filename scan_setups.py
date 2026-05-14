@@ -198,9 +198,18 @@ class Snapshot:
     avg_volume: Optional[float] = None    # 20-day avg vol for liquidity gauge
     # Wave 1: comprehensive level overlays
     fib: Optional[dict] = None            # output of compute_fib_levels
-    pivots: Optional[dict] = None         # output of compute_pivot_points
+    pivots: Optional[dict] = None         # daily pivot points
     vwap_anchored: Optional[float] = None # anchored VWAP from the active swing
     round_numbers: List[float] = field(default_factory=list)
+    # Wave 5: multi-timeframe levels
+    pivots_weekly: Optional[dict] = None
+    pivots_monthly: Optional[dict] = None
+    recent_weekly: List[dict] = field(default_factory=list)   # last N weekly H/L
+    recent_monthly: List[dict] = field(default_factory=list)  # last N monthly H/L
+    vp_weekly: Optional[dict] = None
+    vp_monthly: Optional[dict] = None
+    vp_quarterly: Optional[dict] = None
+    naked_pocs: List[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -360,6 +369,132 @@ def compute_round_numbers(price: float, count: int = 3) -> List[float]:
         if lvl > 0 and lvl != price:
             levels.append(round(lvl, 2))
     return sorted(set(levels))
+
+
+# ---------------------------------------------------------------------------
+# Wave 5 — multi-timeframe levels. CC traders overlay levels from multiple
+# timeframes on a single chart: last N Daily H/L, last N Weekly H/L, last N
+# Monthly H/L, plus Daily/Weekly/Monthly Pivot Points, plus naked POCs (POCs
+# from prior periods that haven't been retraced yet). Every level is labeled
+# with its timeframe so the operator can see at a glance "DAILY R1 vs WEEKLY POC".
+# ---------------------------------------------------------------------------
+def resample_period(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """Resample daily OHLCV to a higher timeframe ('W' = weekly, 'M' = monthly).
+    Standard aggregation: open=first, high=max, low=min, close=last, volume=sum.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+    if not isinstance(df.index, pd.DatetimeIndex):
+        return pd.DataFrame()
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+    try:
+        out = df.resample(rule).agg(agg).dropna()
+    except Exception:
+        return pd.DataFrame()
+    return out
+
+
+def recent_period_extremes(df: pd.DataFrame, count: int = 3) -> dict:
+    """Return the most recent `count` completed-period highs and lows as a
+    list of dicts. Use with resampled weekly/monthly bars.
+      [{period_end, high, low}, ...]
+    """
+    out: list[dict] = []
+    if df is None or df.empty or len(df) < 2:
+        return {"periods": out}
+    # Exclude the current (in-progress) period — only use COMPLETED ones.
+    completed = df.iloc[:-1].tail(count)
+    for ts, row in completed.iterrows():
+        out.append({
+            "period_end": str(ts.date()) if hasattr(ts, "date") else str(ts),
+            "high": float(row["high"]),
+            "low":  float(row["low"]),
+            "close": float(row["close"]) if "close" in row else None,
+        })
+    return {"periods": out}
+
+
+def compute_multi_timeframe_pivots(daily_df: pd.DataFrame) -> dict:
+    """Compute Daily / Weekly / Monthly classic Pivot Points all in one call.
+    Returns a dict with keys 'daily', 'weekly', 'monthly', each containing the
+    pivot-point dict (pp / r1 / r2 / s1 / s2 / prev_h / prev_l / prev_c) for
+    that timeframe."""
+    out = {}
+    if daily_df is None or daily_df.empty:
+        return out
+    out["daily"] = compute_pivot_points(daily_df)
+    weekly = resample_period(daily_df, "W")
+    if not weekly.empty and len(weekly) >= 2:
+        out["weekly"] = compute_pivot_points(weekly)
+    monthly = resample_period(daily_df, "ME")
+    if not monthly.empty and len(monthly) >= 2:
+        out["monthly"] = compute_pivot_points(monthly)
+    return out
+
+
+def compute_multi_timeframe_volume_profile(daily_df: pd.DataFrame) -> dict:
+    """Compute Weekly + Monthly Volume Profile from daily bars.
+      • Weekly VP uses the last 5 trading days
+      • Monthly VP uses the last 21 trading days
+    Each returns {poc, vah, val}.
+    """
+    out = {}
+    if daily_df is None or daily_df.empty:
+        return out
+    if len(daily_df) >= 5:
+        out["weekly"] = compute_volume_profile(daily_df, lookback_bars=5, bins=30)
+    if len(daily_df) >= 21:
+        out["monthly"] = compute_volume_profile(daily_df, lookback_bars=21, bins=40)
+    if len(daily_df) >= 60:
+        out["quarterly"] = compute_volume_profile(daily_df, lookback_bars=60, bins=50)
+    return out
+
+
+def find_naked_pocs(daily_df: pd.DataFrame, periods: int = 8) -> List[dict]:
+    """Compute the POC of each of the last `periods` weekly windows, and flag
+    each as 'naked' if the current price hasn't yet returned to within 0.5% of
+    that POC since it was created. nPOCs act like magnets — price tends to
+    revisit them.
+
+    Returns: [{period_start, period_end, poc, naked: bool}, ...] for the
+    most recent 'naked' POCs (the chart-worthy ones).
+    """
+    out: list[dict] = []
+    if daily_df is None or daily_df.empty or len(daily_df) < 10:
+        return out
+    if not isinstance(daily_df.index, pd.DatetimeIndex):
+        return out
+    weekly_groups = list(daily_df.groupby(pd.Grouper(freq="W")))
+    if len(weekly_groups) < 2:
+        return out
+    px_now = float(daily_df["close"].iloc[-1])
+    # Walk each completed week backwards. The most recent (current) week is excluded.
+    for grp_idx, (week_end, week_df) in enumerate(weekly_groups[:-1]):
+        if week_df.empty or len(week_df) < 2:
+            continue
+        vp = compute_volume_profile(week_df, lookback_bars=len(week_df), bins=20)
+        if not vp or "poc" not in vp:
+            continue
+        poc = float(vp["poc"])
+        # Check if any bar AFTER this week traded within 0.5% of poc
+        later = daily_df[daily_df.index > week_end]
+        if later.empty:
+            naked = True
+        else:
+            tol = abs(poc) * 0.005
+            naked = not bool(
+                ((later["low"] <= poc + tol) & (later["high"] >= poc - tol)).any()
+            )
+        if naked:
+            out.append({
+                "period_end": str(week_end.date()),
+                "poc": poc,
+                "naked": True,
+                "distance_pct": (poc - px_now) / px_now * 100.0 if px_now else 0.0,
+            })
+    # Return the closest 6 naked POCs to current price (most relevant)
+    out.sort(key=lambda x: abs(x["distance_pct"]))
+    return out[:6]
 
 
 # ---------------------------------------------------------------------------
@@ -2248,14 +2383,53 @@ def _snap_chart_body(snap, idx: int, chart_data_by_symbol: dict) -> str:
                 "lineStyle": 2, "lineWidth": 1,
                 "title": f"Fib ext {pct} ${float(px):.2f}",
             })
-    # Pivots
+    # DAILY Pivot Points
     if snap.pivots:
         p = snap.pivots
-        lines.append({"price": p["pp"], "color": "#e2e8f0", "lineStyle": 2, "lineWidth": 1, "title": f"PP ${p['pp']:.2f}"})
+        lines.append({"price": p["pp"], "color": "#fde047", "lineStyle": 2, "lineWidth": 1, "title": f"DAILY PP ${p['pp']:.2f}"})
         for key, label in [("r1","R1"),("r2","R2"),("s1","S1"),("s2","S2")]:
             if key in p:
-                color = "#ef444466" if key.startswith("r") else "#22c55e66"
-                lines.append({"price": p[key], "color": color, "lineStyle": 2, "lineWidth": 1, "title": f"{label} ${p[key]:.2f}"})
+                lines.append({"price": p[key], "color": "#fde04788", "lineStyle": 2, "lineWidth": 1, "title": f"DAILY {label} ${p[key]:.2f}"})
+    # WEEKLY Pivot Points
+    if getattr(snap, "pivots_weekly", None):
+        p = snap.pivots_weekly
+        lines.append({"price": p["pp"], "color": "#ec4899", "lineStyle": 2, "lineWidth": 2, "title": f"WEEKLY PP ${p['pp']:.2f}"})
+        for key, label in [("r1","R1"),("r2","R2"),("s1","S1"),("s2","S2")]:
+            if key in p:
+                lines.append({"price": p[key], "color": "#ec489988", "lineStyle": 2, "lineWidth": 1, "title": f"WEEKLY {label} ${p[key]:.2f}"})
+    # MONTHLY Pivot Points
+    if getattr(snap, "pivots_monthly", None):
+        p = snap.pivots_monthly
+        lines.append({"price": p["pp"], "color": "#a855f7", "lineStyle": 2, "lineWidth": 2, "title": f"MONTHLY PP ${p['pp']:.2f}"})
+        for key, label in [("r1","R1"),("s1","S1")]:
+            if key in p:
+                lines.append({"price": p[key], "color": "#a855f7aa", "lineStyle": 2, "lineWidth": 1, "title": f"MONTHLY {label} ${p[key]:.2f}"})
+    # Recent WEEKLY / MONTHLY highs and lows
+    for w in (getattr(snap, "recent_weekly", []) or [])[-3:]:
+        lines.append({"price": w["high"], "color": "#ec4899aa", "lineStyle": 2, "lineWidth": 1, "title": f"WEEKLY high ${w['high']:.2f}"})
+        lines.append({"price": w["low"],  "color": "#ec4899aa", "lineStyle": 2, "lineWidth": 1, "title": f"WEEKLY low ${w['low']:.2f}"})
+    for m in (getattr(snap, "recent_monthly", []) or [])[-3:]:
+        lines.append({"price": m["high"], "color": "#a855f7aa", "lineStyle": 2, "lineWidth": 1, "title": f"MONTHLY high ${m['high']:.2f}"})
+        lines.append({"price": m["low"],  "color": "#a855f7aa", "lineStyle": 2, "lineWidth": 1, "title": f"MONTHLY low ${m['low']:.2f}"})
+    # WEEKLY Volume Profile
+    vp_w = getattr(snap, "vp_weekly", None)
+    if vp_w and "poc" in vp_w:
+        lines.append({"price": vp_w["poc"], "color": "#f97316", "lineStyle": 0, "lineWidth": 2, "title": f"WEEKLY POC ${vp_w['poc']:.2f}"})
+        if "vah" in vp_w:
+            lines.append({"price": vp_w["vah"], "color": "#f97316aa", "lineStyle": 2, "lineWidth": 1, "title": f"WEEKLY VAH ${vp_w['vah']:.2f}"})
+        if "val" in vp_w:
+            lines.append({"price": vp_w["val"], "color": "#f97316aa", "lineStyle": 2, "lineWidth": 1, "title": f"WEEKLY VAL ${vp_w['val']:.2f}"})
+    # MONTHLY Volume Profile
+    vp_m = getattr(snap, "vp_monthly", None)
+    if vp_m and "poc" in vp_m:
+        lines.append({"price": vp_m["poc"], "color": "#dc2626", "lineStyle": 0, "lineWidth": 2, "title": f"MONTHLY POC ${vp_m['poc']:.2f}"})
+        if "vah" in vp_m:
+            lines.append({"price": vp_m["vah"], "color": "#dc2626aa", "lineStyle": 2, "lineWidth": 1, "title": f"MONTHLY VAH ${vp_m['vah']:.2f}"})
+        if "val" in vp_m:
+            lines.append({"price": vp_m["val"], "color": "#dc2626aa", "lineStyle": 2, "lineWidth": 1, "title": f"MONTHLY VAL ${vp_m['val']:.2f}"})
+    # Naked POCs
+    for n in (getattr(snap, "naked_pocs", []) or [])[:6]:
+        lines.append({"price": float(n["poc"]), "color": "#06b6d4", "lineStyle": 2, "lineWidth": 1, "title": f"nPOC ${float(n['poc']):.2f}"})
     # VWAP
     if snap.vwap_anchored is not None:
         lines.append({
@@ -2522,14 +2696,60 @@ def render_html(
                         "lineStyle": 2, "lineWidth": 1,
                         "title": f"Fib ext {pct} ${float(px):.2f}",
                     })
-            # Pivot Points (PP white, R red, S green) — all dashed thin
+            # DAILY Pivot Points (yellow tones — daily TF)
             if snap.pivots:
                 p = snap.pivots
-                lines.append({"price": p["pp"], "color": "#e2e8f0", "lineStyle": 2, "lineWidth": 1, "title": f"PP ${p['pp']:.2f}"})
+                lines.append({"price": p["pp"], "color": "#fde047", "lineStyle": 2, "lineWidth": 1, "title": f"DAILY PP ${p['pp']:.2f}"})
                 for key, label in [("r1","R1"),("r2","R2"),("s1","S1"),("s2","S2")]:
                     if key in p:
-                        color = "#ef444466" if key.startswith("r") else "#22c55e66"
-                        lines.append({"price": p[key], "color": color, "lineStyle": 2, "lineWidth": 1, "title": f"{label} ${p[key]:.2f}"})
+                        color = "#fde04788" if key.startswith("r") else "#fde04788"
+                        lines.append({"price": p[key], "color": color, "lineStyle": 2, "lineWidth": 1, "title": f"DAILY {label} ${p[key]:.2f}"})
+            # WEEKLY Pivot Points (pink/magenta — weekly TF)
+            if snap.pivots_weekly:
+                p = snap.pivots_weekly
+                lines.append({"price": p["pp"], "color": "#ec4899", "lineStyle": 2, "lineWidth": 2, "title": f"WEEKLY PP ${p['pp']:.2f}"})
+                for key, label in [("r1","R1"),("r2","R2"),("s1","S1"),("s2","S2")]:
+                    if key in p:
+                        lines.append({"price": p[key], "color": "#ec489988", "lineStyle": 2, "lineWidth": 1, "title": f"WEEKLY {label} ${p[key]:.2f}"})
+            # MONTHLY Pivot Points (cyan/purple — monthly TF)
+            if snap.pivots_monthly:
+                p = snap.pivots_monthly
+                lines.append({"price": p["pp"], "color": "#a855f7", "lineStyle": 2, "lineWidth": 2, "title": f"MONTHLY PP ${p['pp']:.2f}"})
+                for key, label in [("r1","R1"),("s1","S1")]:
+                    if key in p:
+                        lines.append({"price": p[key], "color": "#a855f7aa", "lineStyle": 2, "lineWidth": 1, "title": f"MONTHLY {label} ${p[key]:.2f}"})
+            # Recent WEEKLY highs and lows
+            for w in (snap.recent_weekly or [])[-3:]:
+                lines.append({"price": w["high"], "color": "#ec4899aa", "lineStyle": 2, "lineWidth": 1, "title": f"WEEKLY high ${w['high']:.2f}"})
+                lines.append({"price": w["low"],  "color": "#ec4899aa", "lineStyle": 2, "lineWidth": 1, "title": f"WEEKLY low ${w['low']:.2f}"})
+            # Recent MONTHLY highs and lows
+            for m in (snap.recent_monthly or [])[-3:]:
+                lines.append({"price": m["high"], "color": "#a855f7aa", "lineStyle": 2, "lineWidth": 1, "title": f"MONTHLY high ${m['high']:.2f}"})
+                lines.append({"price": m["low"],  "color": "#a855f7aa", "lineStyle": 2, "lineWidth": 1, "title": f"MONTHLY low ${m['low']:.2f}"})
+            # WEEKLY Volume Profile — POC / VAH / VAL
+            if snap.vp_weekly and "poc" in snap.vp_weekly:
+                vp = snap.vp_weekly
+                lines.append({"price": vp["poc"], "color": "#f97316", "lineStyle": 0, "lineWidth": 2, "title": f"WEEKLY POC ${vp['poc']:.2f}"})
+                if "vah" in vp:
+                    lines.append({"price": vp["vah"], "color": "#f97316aa", "lineStyle": 2, "lineWidth": 1, "title": f"WEEKLY VAH ${vp['vah']:.2f}"})
+                if "val" in vp:
+                    lines.append({"price": vp["val"], "color": "#f97316aa", "lineStyle": 2, "lineWidth": 1, "title": f"WEEKLY VAL ${vp['val']:.2f}"})
+            # MONTHLY Volume Profile
+            if snap.vp_monthly and "poc" in snap.vp_monthly:
+                vp = snap.vp_monthly
+                lines.append({"price": vp["poc"], "color": "#dc2626", "lineStyle": 0, "lineWidth": 2, "title": f"MONTHLY POC ${vp['poc']:.2f}"})
+                if "vah" in vp:
+                    lines.append({"price": vp["vah"], "color": "#dc2626aa", "lineStyle": 2, "lineWidth": 1, "title": f"MONTHLY VAH ${vp['vah']:.2f}"})
+                if "val" in vp:
+                    lines.append({"price": vp["val"], "color": "#dc2626aa", "lineStyle": 2, "lineWidth": 1, "title": f"MONTHLY VAL ${vp['val']:.2f}"})
+            # Naked POCs — POCs from prior weeks not yet retested
+            for n in (snap.naked_pocs or [])[:6]:
+                lines.append({
+                    "price": float(n["poc"]),
+                    "color": "#06b6d4",     # cyan — distinctive
+                    "lineStyle": 2, "lineWidth": 1,
+                    "title": f"nPOC ${float(n['poc']):.2f}",
+                })
             # Anchored VWAP — solid blue
             if snap.vwap_anchored is not None:
                 lines.append({
@@ -4258,6 +4478,29 @@ def run_full_scan(
         except Exception:
             vwap_val = None
         round_nums = compute_round_numbers(px, count=3)
+        # Wave 5: multi-timeframe pivots, VPs, recent extremes, naked POCs
+        try:
+            mtf_piv = compute_multi_timeframe_pivots(daily_df)
+        except Exception:
+            mtf_piv = {}
+        try:
+            mtf_vp = compute_multi_timeframe_volume_profile(daily_df)
+        except Exception:
+            mtf_vp = {}
+        try:
+            weekly_df = resample_period(daily_df, "W")
+            recent_weekly = recent_period_extremes(weekly_df, count=3).get("periods", [])
+        except Exception:
+            recent_weekly = []
+        try:
+            monthly_df = resample_period(daily_df, "ME")
+            recent_monthly = recent_period_extremes(monthly_df, count=3).get("periods", [])
+        except Exception:
+            recent_monthly = []
+        try:
+            npocs = find_naked_pocs(daily_df, periods=8)
+        except Exception:
+            npocs = []
         return Snapshot(
             symbol=sym_u,
             current_price=px,
@@ -4267,6 +4510,14 @@ def run_full_scan(
             bid=bid, ask=ask, spread_pct=spread_pct, avg_volume=avg_vol,
             fib=fib_data, pivots=pivots_data,
             vwap_anchored=vwap_val, round_numbers=round_nums,
+            pivots_weekly=mtf_piv.get("weekly"),
+            pivots_monthly=mtf_piv.get("monthly"),
+            recent_weekly=recent_weekly,
+            recent_monthly=recent_monthly,
+            vp_weekly=mtf_vp.get("weekly"),
+            vp_monthly=mtf_vp.get("monthly"),
+            vp_quarterly=mtf_vp.get("quarterly"),
+            naked_pocs=npocs,
             context_flags=build_context(
                 daily_df=daily_df, symbol=sym_u,
                 setup_direction="long",

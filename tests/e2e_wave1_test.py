@@ -199,9 +199,9 @@ check("price-lines include Fib retracement 0.786",
       any("Fib 0.786" in t for t in titles))
 check("price-lines include Fib extension 1.618",
       any("Fib ext 1.618" in t for t in titles))
-check("price-lines include PP",   any(t.startswith("PP ") for t in titles))
-check("price-lines include R1",   any(t.startswith("R1 ") for t in titles))
-check("price-lines include S1",   any(t.startswith("S1 ") for t in titles))
+check("price-lines include PP",   any("PP " in t for t in titles))
+check("price-lines include R1",   any("R1 " in t for t in titles))
+check("price-lines include S1",   any("S1 " in t for t in titles))
 check("price-lines include VWAP", any("VWAP" in t for t in titles))
 check("price-lines include round numbers ($15, $25)",
       any(t == "$15" for t in titles) and any(t == "$25" for t in titles))
@@ -259,7 +259,7 @@ if m2:
     check("setup chart ALSO shows VWAP",
           any("VWAP" in t for t in setup_titles))
     check("setup chart ALSO shows PP",
-          any(t.startswith("PP ") for t in setup_titles))
+          any("PP " in t for t in setup_titles))
 
 
 # ---------------------------------------------------------------------------
