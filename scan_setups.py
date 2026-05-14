@@ -4116,7 +4116,16 @@ def render_html(
             <a href="https://www.tradingview.com/chart/?symbol={tv}" target="_blank">open on TradingView →</a>
           </span></h2>
           <div class="chart-row">
-            <div class="lwc-wrap">{chart_body}<div class="lwc-legend" id="lg_{i}"></div></div>
+            <div class="lwc-wrap">
+              <div class="tf-bar">
+                <button class="tf-btn" data-tf="1H">1H</button>
+                <button class="tf-btn" data-tf="1D">1D</button>
+                <button class="tf-btn" data-tf="1W">1W</button>
+                <button class="tf-btn" data-tf="1M">1M</button>
+              </div>
+              {chart_body}
+              <div class="lwc-legend" id="lg_{i}"></div>
+            </div>
             <div class="setups-side">{levels_html}</div>
           </div>
         </div>
@@ -4308,7 +4317,16 @@ def render_html(
             <a href="https://www.tradingview.com/chart/?symbol={tv}" target="_blank">open on TradingView →</a>
           </span></h2>
           <div class="chart-row">
-            <div class="lwc-wrap">{_snap_chart_body(snap, snap_idx, chart_data_by_symbol)}<div class="lwc-legend" id="lg_snap_{snap_idx}"></div></div>
+            <div class="lwc-wrap">
+              <div class="tf-bar">
+                <button class="tf-btn" data-tf="1H">1H</button>
+                <button class="tf-btn" data-tf="1D">1D</button>
+                <button class="tf-btn" data-tf="1W">1W</button>
+                <button class="tf-btn" data-tf="1M">1M</button>
+              </div>
+              {_snap_chart_body(snap, snap_idx, chart_data_by_symbol)}
+              <div class="lwc-legend" id="lg_snap_{snap_idx}"></div>
+            </div>
             <div class="setups-side">
               <div class="setup-card">
                 <div class="setup-head" style="color:#94a3b8;display:flex;justify-content:space-between;align-items:center">
@@ -4360,6 +4378,12 @@ def render_html(
 
   /* Lightweight Charts container — entry/stop/targets drawn directly */
   .lwc-wrap {{ background:#0a0f1c; border-radius:8px; padding:8px; position:relative; }}
+  /* Timeframe selector bar above each chart */
+  .tf-bar {{ display:flex; gap:4px; margin-bottom:6px; padding:4px; background:#0f172a; border-radius:6px; }}
+  .tf-btn {{ padding:5px 12px; border:1px solid #1e293b; background:#0a0f1c; color:#94a3b8; border-radius:4px; font-size:11px; font-family:ui-monospace,monospace; cursor:pointer; font-weight:600; }}
+  .tf-btn:hover:not(:disabled) {{ background:#1e293b; color:#e2e8f0; }}
+  .tf-btn.active {{ background:#22c55e; color:#000; border-color:#22c55e; }}
+  .tf-btn.tf-unavailable {{ opacity:0.35; cursor:not-allowed; }}
   .lwc-chart {{ height:560px; width:100%; }}
   .lwc-fallback {{ height:560px; display:flex; align-items:center; justify-content:center; color:#64748b; font-size:13px; }}
   .lwc-legend {{ position:absolute; left:14px; top:14px; background:rgba(15,23,42,0.78); border:1px solid #1e293b; border-radius:6px; padding:6px 10px; font-size:11px; font-family:ui-monospace,monospace; color:#94a3b8; pointer-events:none; line-height:1.6; }}
@@ -4693,6 +4717,29 @@ def render_html(
 
     // ---- Lightweight Charts init -----------------------------------------
     function _fmtNum(n) {{ return (n || 0).toFixed(2); }}
+    // Track per-chart state so timeframe switching can replace series in-place.
+    window.cc_chart_handles = window.cc_chart_handles || {{}};
+
+    function _getTfData(rawSymData, tf) {{
+      // New format: {{default_tf, timeframes: {{1H: {{candles,...}}}}}}.
+      // Old format (legacy fallback): {{candles, volume, ema_55, ema_100, ema_200}}.
+      if (rawSymData && rawSymData.timeframes) {{
+        return rawSymData.timeframes[tf] || rawSymData.timeframes[rawSymData.default_tf] || null;
+      }}
+      // Legacy single-timeframe payload — treat it as 1D.
+      if (rawSymData && rawSymData.candles) {{
+        return rawSymData;
+      }}
+      return null;
+    }}
+
+    function _availableTfs(rawSymData) {{
+      if (rawSymData && rawSymData.timeframes) {{
+        return Object.keys(rawSymData.timeframes);
+      }}
+      return rawSymData && rawSymData.candles ? ["1D"] : [];
+    }}
+
     function initLightweightCharts() {{
       if (typeof LightweightCharts === 'undefined') {{
         console.warn('LightweightCharts library not loaded');
@@ -4700,85 +4747,155 @@ def render_html(
       }}
       document.querySelectorAll('.lwc-chart').forEach(function(div) {{
         var sym = div.getAttribute('data-symbol');
-        var data = window.cc_charts_data[sym];
-        if (!data || !data.candles || !data.candles.length) {{
+        var rawData = window.cc_charts_data[sym];
+        var avail = _availableTfs(rawData);
+        if (!avail.length) {{
           div.innerHTML = '<div style="padding:30px;color:#64748b">No chart data for ' + sym + '</div>';
           return;
         }}
+        // Default to 1D if available, otherwise first available
+        var defaultTf = (rawData.default_tf && avail.indexOf(rawData.default_tf) >= 0)
+                          ? rawData.default_tf : avail[0];
+        var initial = _getTfData(rawData, defaultTf);
+        if (!initial || !initial.candles || !initial.candles.length) {{
+          div.innerHTML = '<div style="padding:30px;color:#64748b">No chart data for ' + sym + '</div>';
+          return;
+        }}
+
         var chart = LightweightCharts.createChart(div, {{
           layout:        {{ background: {{ type:'solid', color:'#0a0f1c' }}, textColor:'#94a3b8' }},
           grid:          {{ vertLines: {{ color:'#1e293b' }}, horzLines: {{ color:'#1e293b' }} }},
           rightPriceScale: {{ borderColor:'#1e293b' }},
-          timeScale:     {{ borderColor:'#1e293b', timeVisible:false }},
+          timeScale:     {{ borderColor:'#1e293b', timeVisible:(defaultTf==='1H') }},
           crosshair:     {{ mode: 1 }},
           autoSize:      true,
         }});
+
         var candleSeries = chart.addCandlestickSeries({{
           upColor:'#22c55e', downColor:'#ef4444',
           borderUpColor:'#22c55e', borderDownColor:'#ef4444',
           wickUpColor:'#22c55e', wickDownColor:'#ef4444',
         }});
-        candleSeries.setData(data.candles);
+        candleSeries.setData(initial.candles);
 
-        // Volume — separate scale at bottom
         var volSeries = chart.addHistogramSeries({{
           priceFormat: {{ type:'volume' }},
           priceScaleId: '',
           color:'#22c55e55',
         }});
         volSeries.priceScale().applyOptions({{ scaleMargins: {{ top:0.85, bottom:0 }} }});
-        if (data.volume && data.volume.length) volSeries.setData(data.volume);
+        if (initial.volume && initial.volume.length) volSeries.setData(initial.volume);
 
-        // EMA overlays
-        function addEMA(series, color, title) {{
-          if (!series || !series.length) return null;
+        // EMAs — keep references so we can swap data on TF change
+        var emaSeries = {{}};
+        function addEMA(key, series, color, title) {{
+          if (!series || !series.length) {{ emaSeries[key] = null; return; }}
           var s = chart.addLineSeries({{
             color: color, lineWidth: 1, title: title,
             lastValueVisible:false, priceLineVisible:false,
           }});
           s.setData(series);
-          return s;
+          emaSeries[key] = s;
         }}
-        addEMA(data.ema_55,  '#94a3b8', 'EMA 55');
-        addEMA(data.ema_100, '#cbd5e1', 'EMA 100');
-        addEMA(data.ema_200, '#64748b', 'EMA 200');
+        addEMA('ema_55',  initial.ema_55,  '#94a3b8', 'EMA 55');
+        addEMA('ema_100', initial.ema_100, '#cbd5e1', 'EMA 100');
+        addEMA('ema_200', initial.ema_200, '#64748b', 'EMA 200');
 
-        // Horizontal price-lines: entry, stop, targets, S/R
+        // Horizontal price-lines (Entry/Stop/Targets/Fibs/Pivots/POCs/VWAP).
+        // Drawn on the candle series — they appear on ALL timeframes since
+        // they're absolute price levels, not bar-relative.
         var rawLines = div.getAttribute('data-lines') || '[]';
         var lines;
         try {{ lines = JSON.parse(rawLines); }} catch(_) {{ lines = []; }}
-        lines.forEach(function(l) {{
-          candleSeries.createPriceLine({{
-            price: l.price,
-            color: l.color,
-            lineWidth: l.lineWidth || 2,
-            lineStyle: l.lineStyle === 2 ? LightweightCharts.LineStyle.Dashed : LightweightCharts.LineStyle.Solid,
-            axisLabelVisible: true,
-            title: l.title || '',
+        var priceLineHandles = [];
+        function applyPriceLines() {{
+          priceLineHandles.forEach(function(h) {{ try {{ candleSeries.removePriceLine(h); }} catch(_) {{}} }});
+          priceLineHandles = lines.map(function(l) {{
+            return candleSeries.createPriceLine({{
+              price: l.price, color: l.color, lineWidth: l.lineWidth || 2,
+              lineStyle: l.lineStyle === 2 ? LightweightCharts.LineStyle.Dashed : LightweightCharts.LineStyle.Solid,
+              axisLabelVisible: true,
+              title: l.title || '',
+            }});
           }});
-        }});
+        }}
+        applyPriceLines();
 
-        // Legend in the top-left of this chart
+        // Legend
         var legendId = div.id.replace('lwc_', 'lg_');
         var legend = document.getElementById(legendId);
         if (legend) {{
-          var legendRows = '<div class="lg-row"><span class="lg-dot" style="background:#22c55e"></span> Bull candle</div>'
-                         + '<div class="lg-row"><span class="lg-dot" style="background:#94a3b8"></span> EMA 55</div>'
-                         + '<div class="lg-row"><span class="lg-dot" style="background:#cbd5e1"></span> EMA 100</div>'
-                         + '<div class="lg-row"><span class="lg-dot" style="background:#64748b"></span> EMA 200</div>';
-          if (lines.length) {{
-            legend.innerHTML = legendRows + '<div class="lg-row"><span class="lg-px">' + sym + '</span></div>';
-          }} else {{
-            legend.innerHTML = legendRows;
-          }}
+          legend.innerHTML =
+            '<div class="lg-row"><span class="lg-dot" style="background:#22c55e"></span> Bull candle</div>'
+          + '<div class="lg-row"><span class="lg-dot" style="background:#94a3b8"></span> EMA 55</div>'
+          + '<div class="lg-row"><span class="lg-dot" style="background:#cbd5e1"></span> EMA 100</div>'
+          + '<div class="lg-row"><span class="lg-dot" style="background:#64748b"></span> EMA 200</div>'
+          + '<div class="lg-row"><span class="lg-px">' + sym + '</span></div>';
         }}
 
         chart.timeScale().fitContent();
-        // Resize chart when window resizes
         new ResizeObserver(function() {{
           chart.applyOptions({{ width: div.clientWidth, height: div.clientHeight }});
         }}).observe(div);
+
+        // Store handles for the TF selector to swap data
+        window.cc_chart_handles[div.id] = {{
+          chart: chart,
+          candleSeries: candleSeries,
+          volSeries: volSeries,
+          emaSeries: emaSeries,
+          currentTf: defaultTf,
+          rawData: rawData,
+        }};
+
+        // Wire timeframe selector buttons (if present near this chart)
+        var wrap = div.closest('.lwc-wrap');
+        if (wrap) {{
+          var btns = wrap.querySelectorAll('.tf-btn');
+          btns.forEach(function(btn) {{
+            var tf = btn.getAttribute('data-tf');
+            // Disable buttons for TFs not available for this symbol
+            if (avail.indexOf(tf) < 0) {{
+              btn.classList.add('tf-unavailable');
+              btn.title = tf + ' not available (yfinance limit or insufficient history)';
+              btn.disabled = true;
+            }}
+            if (tf === defaultTf) btn.classList.add('active');
+            btn.addEventListener('click', function() {{
+              if (btn.disabled) return;
+              switchTimeframe(div.id, tf, btn);
+            }});
+          }});
+        }}
       }});
+    }}
+
+    function switchTimeframe(chartId, tf, btn) {{
+      var h = window.cc_chart_handles[chartId];
+      if (!h) return;
+      var tfData = _getTfData(h.rawData, tf);
+      if (!tfData || !tfData.candles || !tfData.candles.length) return;
+      h.candleSeries.setData(tfData.candles);
+      if (h.volSeries && tfData.volume) h.volSeries.setData(tfData.volume);
+      // Refresh EMA series. Some TFs may not have EMAs (not enough bars).
+      ['ema_55','ema_100','ema_200'].forEach(function(k) {{
+        var s = h.emaSeries[k];
+        if (s) {{
+          s.setData(tfData[k] || []);
+        }}
+      }});
+      // Update timeVisible flag for intraday
+      h.chart.applyOptions({{ timeScale: {{ timeVisible: (tf === '1H') }} }});
+      h.chart.timeScale().fitContent();
+      h.currentTf = tf;
+      // Highlight active button
+      if (btn) {{
+        var wrap = btn.closest('.lwc-wrap');
+        if (wrap) {{
+          wrap.querySelectorAll('.tf-btn').forEach(function(b) {{ b.classList.remove('active'); }});
+          btn.classList.add('active');
+        }}
+      }}
     }}
 
     function getStars()  {{ try {{ return JSON.parse(localStorage.getItem('cc_stars')  || '[]'); }} catch(_) {{ return []; }} }}
@@ -5723,21 +5840,97 @@ def run_full_scan(
     chart_data_by_symbol: dict[str, dict] = {}  # OHLCV + EMA arrays for charting
     all_watches: list[WatchItem] = []
 
+    def _serialize_tf(d: pd.DataFrame, daily_format: bool) -> dict:
+        """Serialize one timeframe of OHLCV → dict for Lightweight Charts.
+        daily_format=True → time strings like "YYYY-MM-DD"; False → unix seconds
+        (required by LWC for intraday so it doesn't aggregate them as daily)."""
+        if d is None or d.empty:
+            return {"candles": [], "volume": [], "ema_55": [], "ema_100": [], "ema_200": []}
+        d = d.copy()
+        if daily_format:
+            times = [t.strftime("%Y-%m-%d") if hasattr(t, "strftime") else str(t) for t in d.index]
+        else:
+            times = [int(t.timestamp()) if hasattr(t, "timestamp") else 0 for t in d.index]
+        candles = []
+        for ts, row in zip(times, d.itertuples(index=False)):
+            o, h, l, c = float(row.open), float(row.high), float(row.low), float(row.close)
+            candles.append({"time": ts, "open": o, "high": h, "low": l, "close": c})
+        vols = []
+        prev_c = None
+        for ts, row in zip(times, d.itertuples(index=False)):
+            v = float(row.volume) if not pd.isna(row.volume) else 0
+            color = "#22c55e55" if (prev_c is None or row.close >= prev_c) else "#ef444455"
+            vols.append({"time": ts, "value": v, "color": color})
+            prev_c = row.close
+        close_s = d["close"]
+        def _ema_series(length: int) -> list[dict]:
+            s = ema(close_s, length)
+            return [{"time": ts, "value": float(v)} for ts, v in zip(times, s.values) if pd.notna(v)]
+        return {
+            "candles": candles,
+            "volume":  vols,
+            "ema_55":  _ema_series(55)  if len(close_s) > 55  else [],
+            "ema_100": _ema_series(100) if len(close_s) > 100 else [],
+            "ema_200": _ema_series(200) if len(close_s) > 200 else [],
+        }
+
+    def _fetch_hourly(sym_u: str) -> Optional[pd.DataFrame]:
+        """Fetch the last ~60 days of 60-minute bars for this ticker. yfinance
+        caps interval=60m at 730 days but each query at ~60 days. We use 60d
+        which is the sweet spot of breadth vs reliability."""
+        try:
+            import io, contextlib
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                d = yf.download(sym_u, period="60d", interval="60m",
+                                auto_adjust=True, progress=False, threads=False)
+            if d is None or d.empty:
+                return None
+            if isinstance(d.columns, pd.MultiIndex):
+                d.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in d.columns]
+            else:
+                d.columns = [c.lower() for c in d.columns]
+            return d[["open","high","low","close","volume"]].dropna()
+        except Exception:
+            return None
+
     def _build_chart_data(sym_u: str, daily_df: pd.DataFrame) -> dict:
-        """Serialize the last ~250 daily bars + EMA overlays for Lightweight Charts.
-        Format follows lightweight-charts' time-and-value convention:
-          candles: [{time, open, high, low, close}, ...]
-          volume:  [{time, value, color}, ...]
-          ema_55 / ema_100 / ema_200: [{time, value}, ...]   (NaN entries dropped)
+        """Build multi-timeframe chart data for the LWC chart.
+        Returns:
+          {
+            "default_tf": "1D",
+            "timeframes": {
+              "1H":  {candles, volume, ema_55, ema_100, ema_200},   # last ~60 days hourly
+              "1D":  {...}, # last 260 daily bars
+              "1W":  {...}, # weekly resampled from daily
+              "1M":  {...}, # monthly resampled from daily
+            }
+          }
         """
         d = daily_df.tail(260).copy()
-        # Time is YYYY-MM-DD strings — lightweight-charts accepts those for daily bars.
+        tfs: dict[str, dict] = {}
+        tfs["1D"] = _serialize_tf(d, daily_format=True)
+        # Weekly + Monthly are resampled from daily — cheap & always available
+        weekly_full = resample_period(daily_df, "W")
+        if not weekly_full.empty:
+            tfs["1W"] = _serialize_tf(weekly_full.tail(260), daily_format=True)
+        monthly_full = resample_period(daily_df, "ME")
+        if not monthly_full.empty:
+            tfs["1M"] = _serialize_tf(monthly_full.tail(120), daily_format=True)
+        # Hourly is a separate yfinance fetch — only ~60 days available
+        hourly = _fetch_hourly(sym_u)
+        if hourly is not None and not hourly.empty:
+            tfs["1H"] = _serialize_tf(hourly, daily_format=False)
+        return {"default_tf": "1D", "timeframes": tfs}
+
+    def _build_chart_data_OLD_UNUSED(sym_u: str, daily_df: pd.DataFrame) -> dict:
+        """Kept for reference."""
+        d = daily_df.tail(260).copy()
         times = [t.strftime("%Y-%m-%d") if hasattr(t, "strftime") else str(t) for t in d.index]
         candles = []
         for ts, row in zip(times, d.itertuples(index=False)):
             o, h, l, c = float(row.open), float(row.high), float(row.low), float(row.close)
             candles.append({"time": ts, "open": o, "high": h, "low": l, "close": c})
-        # Volume series with green/red coloring vs prior close.
         vols = []
         prev_c = None
         for ts, row in zip(times, d.itertuples(index=False)):
