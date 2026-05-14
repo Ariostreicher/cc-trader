@@ -210,6 +210,8 @@ class Snapshot:
     vp_monthly: Optional[dict] = None
     vp_quarterly: Optional[dict] = None
     naked_pocs: List[dict] = field(default_factory=list)
+    # Wave 7: Structured Equity Analysis Model (fundamental backdrop)
+    equity_analysis: Optional[dict] = None
 
 
 @dataclass
@@ -2175,6 +2177,197 @@ Write your senior-trader review now."""
         return f"(AI commentary unavailable: {type(e).__name__})"
 
 
+# ---------------------------------------------------------------------------
+# Structured Equity Analysis Model — the FUNDAMENTAL half of the CC methodology
+# (per "Structured Equity Model Master Instructions.pdf"). This is a 9-step
+# procedural review with category scoring. It complements the technical
+# detectors above by adding the underlying-business view.
+# ---------------------------------------------------------------------------
+EQUITY_MODEL_SYSTEM = """You are an equity analyst applying the Structured
+Equity Analysis Model — a procedural 9-step framework with strict scoring.
+
+INPUT: a company ticker (e.g. AAPL, GOOGL).
+
+EXECUTE all 9 steps in order. Do NOT skip, merge, reorder, or add steps.
+
+STEP 1 — Snapshot & Business Overview (sector, products, revenue mix)
+STEP 2 — Financial Quality, Balance Sheet & Valuation Metrics
+STEP 3 — Competitive Positioning & Moat
+STEP 4 — Bull Thesis & Growth Drivers
+STEP 5 — Bear Thesis & Structural Risks
+STEP 6 — Analyst Sentiment & Market Flow
+STEP 7 — Scenario-Based Valuation & Return Framework
+STEP 8 — Scorecard, Composite Rating & Final Assessment
+STEP 9 — Investment Thesis & Invalidation Triggers
+
+SCORING RUBRIC (1.0-5.0, decimals allowed):
+  5.0 = Structurally dominant, durable advantages
+  4.0 = Strong positioning with manageable risks
+  3.0 = Balanced strengths and weaknesses
+  2.0 = Structural vulnerabilities present
+  1.0 = Structural fragility or capital impairment risk
+
+7 CATEGORIES to score (each 1.0-5.0):
+  - Business Quality
+  - Financial Quality
+  - Competitive Positioning
+  - Growth Potential
+  - Risk Profile
+  - Sentiment & Positioning
+  - Valuation Outlook
+
+COMPOSITE RATING = average of the 7 category scores.
+
+CONVICTION BANDS:
+  4.5-5.0 → Very High Conviction
+  4.0-4.49 → High Conviction
+  3.5-3.99 → Moderate Conviction
+  3.0-3.49 → Selective / Cautious
+  Below 3.0 → Avoid / Monitor
+
+OUTPUT FORMAT — return JSON ONLY (no prose around it):
+{
+  "ticker": "...",
+  "snapshot": "1-2 sentence business summary",
+  "bull_thesis": "1-2 sentence bull case",
+  "bear_thesis": "1-2 sentence bear case",
+  "scores": {
+    "business_quality": 0.0,
+    "financial_quality": 0.0,
+    "competitive_positioning": 0.0,
+    "growth_potential": 0.0,
+    "risk_profile": 0.0,
+    "sentiment_positioning": 0.0,
+    "valuation_outlook": 0.0
+  },
+  "composite": 0.0,
+  "conviction_band": "...",
+  "stance": "Long / Hold / Avoid",
+  "invalidation_triggers": ["...","..."]
+}
+
+Be concise and decisive. Do NOT hedge. The score is binding."""
+
+
+def analyze_equity_model(symbol: str, api_key: str, model: str) -> Optional[dict]:
+    """Call Groq with the Structured Equity Analysis Master Instructions
+    prompt and return the parsed JSON output. Returns None on failure."""
+    import json as _json
+    import urllib.request
+
+    if not api_key:
+        return None
+
+    body = _json.dumps({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": EQUITY_MODEL_SYSTEM},
+            {"role": "user",   "content": symbol.strip().upper()},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 700,
+        "response_format": {"type": "json_object"},
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.groq.com/openai/v1/chat/completions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            data = _json.loads(resp.read())
+        content = data["choices"][0]["message"]["content"].strip()
+        result = _json.loads(content)
+        return result
+    except Exception:
+        # Try without response_format (some Groq models reject it)
+        try:
+            body2 = _json.dumps({
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": EQUITY_MODEL_SYSTEM},
+                    {"role": "user",   "content": symbol.strip().upper()},
+                ],
+                "temperature": 0.2,
+                "max_tokens": 700,
+            }).encode("utf-8")
+            req2 = urllib.request.Request(
+                "https://api.groq.com/openai/v1/chat/completions",
+                data=body2,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            with urllib.request.urlopen(req2, timeout=25) as resp:
+                data = _json.loads(resp.read())
+            content = data["choices"][0]["message"]["content"].strip()
+            # Find first { and last } to handle preamble
+            i, j = content.find("{"), content.rfind("}")
+            if i >= 0 and j > i:
+                return _json.loads(content[i:j+1])
+            return None
+        except Exception:
+            return None
+
+
+def conviction_band_for(composite: float) -> str:
+    """Map a composite score to the canonical conviction band string."""
+    if composite >= 4.5:  return "Very High Conviction"
+    if composite >= 4.0:  return "High Conviction"
+    if composite >= 3.5:  return "Moderate Conviction"
+    if composite >= 3.0:  return "Selective / Cautious"
+    return "Avoid / Monitor"
+
+
+# Cache the equity model results on disk so we don't re-fetch for the same
+# ticker on every scan. Refresh per-ticker every ~24 hours.
+_EQUITY_CACHE_FILE = Path(__file__).parent / "equity_model_cache.json"
+
+
+def _load_equity_cache() -> dict:
+    if not _EQUITY_CACHE_FILE.exists():
+        return {}
+    try:
+        return json.loads(_EQUITY_CACHE_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def _save_equity_cache(cache: dict) -> None:
+    try:
+        _EQUITY_CACHE_FILE.write_text(json.dumps(cache, indent=2, default=str))
+    except Exception:
+        pass
+
+
+def get_equity_analysis(symbol: str, api_key: str, model: str,
+                        max_age_hours: int = 24) -> Optional[dict]:
+    """Public entry. Returns cached analysis if fresh; otherwise calls AI and
+    caches. The cache makes scans fast (no AI call per ticker per scan)."""
+    sym = symbol.strip().upper()
+    cache = _load_equity_cache()
+    entry = cache.get(sym)
+    now = datetime.utcnow()
+    if entry:
+        try:
+            saved_at = datetime.fromisoformat(entry.get("_saved_at", ""))
+            age = (now - saved_at).total_seconds() / 3600.0
+            if age <= max_age_hours:
+                return entry.get("data")
+        except Exception:
+            pass
+    result = analyze_equity_model(sym, api_key, model)
+    if result is None:
+        return None
+    cache[sym] = {"_saved_at": now.isoformat(), "data": result}
+    _save_equity_cache(cache)
+    return result
+
+
 def _load_groq_config() -> tuple[str, str]:
     """Read Groq key + model. Priority:
       1. .env on disk (local dev — wins over shell env to dodge `source .env` staleness)
@@ -2457,6 +2650,89 @@ _AI_OFFLINE_BLOCK = (
     "Set <code>OPENAI_API_KEY</code> in your Render dashboard → Environment to enable this.)</i>"
     "</div>"
 )
+
+
+def _render_equity_panel(eq: Optional[dict]) -> str:
+    """Render the Structured Equity Analysis Model result as a card panel.
+    Shows the 7 category scores, composite + conviction band, stance, and
+    invalidation triggers. Returns empty string if eq is None."""
+    if not eq:
+        return ""
+    scores = eq.get("scores") or {}
+    composite = eq.get("composite") or (
+        sum(scores.values()) / len(scores) if scores else 0.0
+    )
+    try:
+        composite = float(composite)
+    except Exception:
+        composite = 0.0
+    band = eq.get("conviction_band") or conviction_band_for(composite)
+    stance = eq.get("stance") or "—"
+    band_color = "#22c55e" if composite >= 4.0 else (
+                 "#86efac" if composite >= 3.5 else (
+                 "#f59e0b" if composite >= 3.0 else "#ef4444"))
+    invalidation = eq.get("invalidation_triggers") or []
+    bull = eq.get("bull_thesis", "")
+    bear = eq.get("bear_thesis", "")
+    snap_blurb = eq.get("snapshot", "")
+
+    cat_rows = []
+    label_map = {
+        "business_quality":      "Business Quality",
+        "financial_quality":     "Financial Quality",
+        "competitive_positioning":"Competitive Position",
+        "growth_potential":      "Growth Potential",
+        "risk_profile":          "Risk Profile",
+        "sentiment_positioning": "Sentiment & Positioning",
+        "valuation_outlook":     "Valuation Outlook",
+    }
+    for key, label in label_map.items():
+        v = scores.get(key)
+        if v is None:
+            continue
+        try:
+            v = float(v)
+        except Exception:
+            continue
+        score_col = "#22c55e" if v >= 4.0 else ("#86efac" if v >= 3.5 else (
+                    "#f59e0b" if v >= 3.0 else "#ef4444"))
+        # 5-dot visual scale
+        dots = ""
+        for i in range(1, 6):
+            filled = i <= round(v)
+            dots += (
+                f'<span style="display:inline-block;width:8px;height:8px;border-radius:50%;'
+                f'background:{score_col if filled else "#1e293b"};margin-right:2px"></span>'
+            )
+        cat_rows.append(
+            f'<div class="eq-row"><span class="eq-label">{label}</span>'
+            f'<span class="eq-score">{dots}<span class="eq-val" style="color:{score_col}">'
+            f'{v:.1f}</span></span></div>'
+        )
+
+    inval_html = ""
+    if invalidation:
+        items = "".join(f"<li>{x}</li>" for x in invalidation[:4])
+        inval_html = f'<div class="eq-inval"><b>Invalidation triggers:</b><ul>{items}</ul></div>'
+
+    return f'''
+    <div class="equity-panel">
+      <div class="eq-head">
+        <span class="eq-title">📊 Structured Equity Analysis</span>
+        <span class="eq-band" style="background:{band_color};color:#000">
+          {composite:.2f} · {band}
+        </span>
+      </div>
+      <div class="eq-snap">{snap_blurb}</div>
+      <div class="eq-grid">{"".join(cat_rows)}</div>
+      <div class="eq-stance"><b>Stance:</b> <span style="color:{band_color}">{stance}</span></div>
+      <div class="eq-thesis">
+        <div><b style="color:#22c55e">Bull:</b> {bull}</div>
+        <div><b style="color:#ef4444">Bear:</b> {bear}</div>
+      </div>
+      {inval_html}
+    </div>
+    '''
 
 
 def _ai_voice_block(ai_text: str) -> str:
@@ -2803,6 +3079,7 @@ def render_html(
               <div class="cite">📖 {ts.citation}</div>
               {_render_flags(ts.context_flags)}
               {_render_key_levels_panel(levels_by_symbol.get(ts.symbol))}
+              {_render_equity_panel(getattr(levels_by_symbol.get(ts.symbol), "equity_analysis", None))}
               {(_ai_voice_block(ts.ai_analysis))}
               <div class="setup-actions">
                 <button onclick="sizeTrade('{ts.symbol}', {ts.entry:.4f}, {ts.stop_loss:.4f})">📐 Size this</button>
@@ -3029,6 +3306,7 @@ def render_html(
                   </span>
                 </div>
                 {_render_key_levels_panel(snap)}
+                {_render_equity_panel(getattr(snap, "equity_analysis", None))}
                 {_render_flags(snap.context_flags)}
                 <div class="rationale" style="margin-top:10px">
                   No Chart Champions setup is firing on this ticker right now. Use the chart + values above to monitor it. When a CC pattern develops (EMA pullback, CC region retracement, S/R flip, etc.) it will appear in the table on the next scan.
@@ -3183,6 +3461,24 @@ def render_html(
   .monitor-row:hover {{ background:#111827; }}
   .mon-btn {{ padding:3px 8px; border-radius:4px; border:1px solid #1e293b; background:#0a0f1c; color:#94a3b8; cursor:pointer; font-size:10px; font-family:ui-monospace,monospace; margin-right:3px; }}
   .mon-btn:hover {{ background:#1e293b; color:#e2e8f0; }}
+
+  /* Equity Analysis panel (Structured Equity Analysis Model — fundamentals) */
+  .equity-panel {{ margin-top:10px; padding:12px; background:linear-gradient(135deg,#0f172a 0%,#1e1b4b 100%); border:1px solid #312e81; border-left:4px solid #a78bfa; border-radius:8px; font-size:11px; }}
+  .eq-head {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }}
+  .eq-title {{ font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#a78bfa; font-weight:700; }}
+  .eq-band {{ padding:3px 10px; border-radius:4px; font-size:10px; font-weight:700; font-family:ui-monospace,monospace; }}
+  .eq-snap {{ color:#cbd5e1; margin-bottom:8px; line-height:1.4; }}
+  .eq-grid {{ display:grid; gap:3px; margin-bottom:8px; }}
+  .eq-row {{ display:flex; justify-content:space-between; align-items:center; padding:3px 0; border-bottom:1px solid #1e293b; }}
+  .eq-label {{ color:#94a3b8; }}
+  .eq-score {{ display:flex; align-items:center; gap:8px; }}
+  .eq-val {{ font-family:ui-monospace,monospace; font-weight:700; min-width:30px; text-align:right; }}
+  .eq-stance {{ margin-top:6px; color:#cbd5e1; }}
+  .eq-thesis {{ margin-top:6px; font-size:10px; color:#94a3b8; line-height:1.4; }}
+  .eq-thesis div {{ margin-top:2px; }}
+  .eq-inval {{ margin-top:8px; padding-top:8px; border-top:1px solid #1e293b; color:#fbbf24; font-size:10px; }}
+  .eq-inval ul {{ margin:4px 0 0 0; padding-left:18px; color:#94a3b8; }}
+  .eq-inval li {{ margin-bottom:2px; }}
 
   /* Snapshot card action buttons (star, bell, +list, +setup) */
   .snap-actions {{ display:flex; gap:4px; align-items:center; }}
@@ -4584,6 +4880,27 @@ def run_full_scan(
         print(f"\n  AI senior-trader commentary on {len(all_setups)} setup(s)...")
         for s in all_setups:
             s.ai_analysis = ai_enhance_setup(s, api_key, model)
+    # Wave 7 — Equity Model fundamental analysis per scanned ticker.
+    # Cached on disk for 24h so we don't burn quota every scan.
+    if api_key:
+        fundamental_syms: set[str] = set()
+        for s in all_setups:
+            fundamental_syms.add(s.symbol)
+        for snap in snapshots:
+            fundamental_syms.add(snap.symbol)
+        # Limit to first 8 tickers per scan to stay under Groq daily quota.
+        eligible = sorted(fundamental_syms)[:8]
+        if eligible:
+            print(f"\n  Equity Model (fundamental) analysis on {len(eligible)} ticker(s)...")
+        for sym_u in eligible:
+            try:
+                eq = get_equity_analysis(sym_u, api_key, model, max_age_hours=24)
+            except Exception:
+                eq = None
+            if eq is None:
+                continue
+            if sym_u in levels_by_symbol:
+                levels_by_symbol[sym_u].equity_analysis = eq
 
     duration = time.time() - started
     # Compute correlation concentration across the fired setups.
