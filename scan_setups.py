@@ -196,6 +196,11 @@ class Snapshot:
     ask: Optional[float] = None
     spread_pct: Optional[float] = None    # (ask - bid) / mid × 100
     avg_volume: Optional[float] = None    # 20-day avg vol for liquidity gauge
+    # Wave 1: comprehensive level overlays
+    fib: Optional[dict] = None            # output of compute_fib_levels
+    pivots: Optional[dict] = None         # output of compute_pivot_points
+    vwap_anchored: Optional[float] = None # anchored VWAP from the active swing
+    round_numbers: List[float] = field(default_factory=list)
 
 
 @dataclass
@@ -227,6 +232,134 @@ class Setup:
         if self.direction == "long":
             return (self.targets[0] - self.entry) / self.entry * 100
         return (self.entry - self.targets[0]) / self.entry * 100
+
+
+# ---------------------------------------------------------------------------
+# Wave 1 level helpers — every chart should show the full Fibonacci ladder,
+# anchored VWAP, classic Pivot Points, and round numbers, not just EMAs and
+# swing pivots. CC methodology references all of these as primary levels.
+# ---------------------------------------------------------------------------
+def compute_fib_levels(df: pd.DataFrame, lookback_bars: int = 250) -> dict:
+    """Return Fibonacci retracements + extensions anchored to the highest high
+    and lowest low in the most recent `lookback_bars` (default ~12 months daily).
+    Direction is auto-detected:
+      • If the high came AFTER the low → uptrend swing, retracements sit
+        BELOW the high (support on pullback from $H to $L).
+      • If the low came AFTER the high → downtrend swing, retracements sit
+        ABOVE the low (resistance on bounce from $L back toward $H).
+
+    Returns:
+      {
+        'high': float, 'low': float, 'direction': 'up'|'down',
+        'retracements': {'0.236': px, '0.382': px, ... '0.786': px, '1.0': px},
+        'extensions':   {'1.272': px, '1.414': px, '1.618': px},
+      }
+    """
+    if df is None or df.empty or len(df) < 10:
+        return {}
+    window = df.tail(lookback_bars)
+    hi_idx = window["high"].idxmax()
+    lo_idx = window["low"].idxmin()
+    hi = float(window.loc[hi_idx, "high"])
+    lo = float(window.loc[lo_idx, "low"])
+    if hi <= lo:
+        return {}
+    direction = "up" if hi_idx > lo_idx else "down"
+    rng = hi - lo
+    levels = {}
+    for pct in (0.236, 0.382, 0.500, 0.618, 0.660, 0.786):
+        if direction == "up":
+            levels[f"{pct:.3f}"] = hi - pct * rng
+        else:
+            levels[f"{pct:.3f}"] = lo + pct * rng
+    levels["1.000"] = lo if direction == "up" else hi
+    extensions = {}
+    for ext in (1.272, 1.414, 1.618):
+        if direction == "up":
+            extensions[f"{ext:.3f}"] = hi + (ext - 1.0) * rng
+        else:
+            extensions[f"{ext:.3f}"] = lo - (ext - 1.0) * rng
+    return {
+        "high": hi, "low": lo,
+        "direction": direction,
+        "retracements": levels,
+        "extensions": extensions,
+    }
+
+
+def compute_pivot_points(df: pd.DataFrame) -> dict:
+    """Classic floor-trader Pivot Points from the previous completed bar.
+    Used by intraday + daily traders alike — they act as magnets that the
+    price respects more often than chance.
+
+    Returns: {pp, r1, r2, r3, s1, s2, s3, prev_high, prev_low, prev_close}
+    """
+    if df is None or df.empty or len(df) < 2:
+        return {}
+    prev = df.iloc[-2]
+    ph, pl, pc = float(prev["high"]), float(prev["low"]), float(prev["close"])
+    pp = (ph + pl + pc) / 3.0
+    rng = ph - pl
+    return {
+        "pp": pp,
+        "r1": 2 * pp - pl,        "r2": pp + rng,           "r3": ph + 2 * (pp - pl),
+        "s1": 2 * pp - ph,        "s2": pp - rng,           "s3": pl - 2 * (ph - pp),
+        "prev_high": ph, "prev_low": pl, "prev_close": pc,
+    }
+
+
+def compute_anchored_vwap(df: pd.DataFrame, anchor_idx: int = None,
+                          lookback_bars: int = 250) -> Optional[float]:
+    """Anchored VWAP from an anchor bar to the latest bar.
+
+    Default anchor: the most recent extreme (high or low) in the last
+    `lookback_bars`. That gives a "VWAP from the major pivot" which is a
+    classic CC reference for measuring whether the move from the swing has
+    been on conviction or thin liquidity.
+
+    Returns: float VWAP, or None if not computable.
+    """
+    if df is None or df.empty or len(df) < 5:
+        return None
+    if anchor_idx is None:
+        window = df.tail(lookback_bars)
+        hi_pos = window["high"].argmax()
+        lo_pos = window["low"].argmin()
+        # Anchor to whichever extreme is MORE RECENT (the active swing leg)
+        anchor_pos = max(hi_pos, lo_pos)
+        # Translate position in window back to position in full df
+        anchor_idx = (len(df) - len(window)) + anchor_pos
+    seg = df.iloc[anchor_idx:]
+    if seg.empty or "volume" not in seg.columns:
+        return None
+    typical = (seg["high"] + seg["low"] + seg["close"]) / 3.0
+    pv = (typical * seg["volume"]).sum()
+    v  = seg["volume"].sum()
+    if v <= 0:
+        return None
+    return float(pv / v)
+
+
+def compute_round_numbers(price: float, count: int = 3) -> List[float]:
+    """Return the `count` nearest round-number levels above and below `price`.
+    Step size scales with price so we don't spam tiny stocks with $50 steps.
+    """
+    if price <= 0:
+        return []
+    if price < 5:        step = 0.50
+    elif price < 20:     step = 1.0
+    elif price < 50:     step = 5.0
+    elif price < 200:    step = 10.0
+    elif price < 1000:   step = 25.0
+    elif price < 5000:   step = 100.0
+    else:                step = 500.0
+    base = round(price / step) * step
+    levels = []
+    for i in range(-count, count + 1):
+        lvl = base + i * step
+        if lvl > 0 and lvl != price:
+            levels.append(round(lvl, 2))
+    return sorted(set(levels))
 
 
 # ---------------------------------------------------------------------------
@@ -1295,17 +1428,58 @@ def resolve_ticker(query: str) -> str:
 
 
 def _snap_chart_body(snap, idx: int, chart_data_by_symbol: dict) -> str:
-    """Lightweight Charts container for a snapshot card (no setup), with
-    only S/R + EMA overlays — no entry/stop/target lines."""
+    """Lightweight Charts container for a snapshot card (no setup). Shows the
+    full Wave-1 level overlay: S/R + Fibonacci ladder + Pivot Points + VWAP +
+    round numbers. Same set as setup cards minus entry/stop/targets."""
     import json as _json
     sym = snap.symbol
     if sym not in chart_data_by_symbol:
         return '<div class="lwc-fallback">📉 Chart data unavailable — try refreshing.</div>'
     lines: list[dict] = []
+    # Swing S/R clusters
     for sup in (snap.support_levels or [])[-3:]:
         lines.append({"price": sup, "color": "#22c55e88", "lineStyle": 2, "lineWidth": 1, "title": f"S ${sup:.2f}"})
     for res in (snap.resistance_levels or [])[-3:]:
         lines.append({"price": res, "color": "#ef444488", "lineStyle": 2, "lineWidth": 1, "title": f"R ${res:.2f}"})
+    # Fibonacci ladder
+    if snap.fib and snap.fib.get("retracements"):
+        for pct, px in snap.fib["retracements"].items():
+            is_cc = pct in ("0.618", "0.660")
+            lines.append({
+                "price": float(px),
+                "color": "#fbbf24" if is_cc else "#fbbf2488",
+                "lineStyle": 2,
+                "lineWidth": 2 if is_cc else 1,
+                "title": f"Fib {pct} ${float(px):.2f}",
+            })
+        for pct, px in (snap.fib.get("extensions") or {}).items():
+            lines.append({
+                "price": float(px), "color": "#f97316aa",
+                "lineStyle": 2, "lineWidth": 1,
+                "title": f"Fib ext {pct} ${float(px):.2f}",
+            })
+    # Pivots
+    if snap.pivots:
+        p = snap.pivots
+        lines.append({"price": p["pp"], "color": "#e2e8f0", "lineStyle": 2, "lineWidth": 1, "title": f"PP ${p['pp']:.2f}"})
+        for key, label in [("r1","R1"),("r2","R2"),("s1","S1"),("s2","S2")]:
+            if key in p:
+                color = "#ef444466" if key.startswith("r") else "#22c55e66"
+                lines.append({"price": p[key], "color": color, "lineStyle": 2, "lineWidth": 1, "title": f"{label} ${p[key]:.2f}"})
+    # VWAP
+    if snap.vwap_anchored is not None:
+        lines.append({
+            "price": float(snap.vwap_anchored),
+            "color": "#3b82f6", "lineStyle": 0, "lineWidth": 2,
+            "title": f"VWAP ${float(snap.vwap_anchored):.2f}",
+        })
+    # Round numbers
+    for rn in (snap.round_numbers or [])[:6]:
+        lines.append({
+            "price": float(rn), "color": "#94a3b822",
+            "lineStyle": 2, "lineWidth": 1,
+            "title": f"${float(rn):.0f}",
+        })
     return (
         f'<div class="lwc-chart" id="lwc_snap_{idx}" data-symbol="{sym}" '
         f"data-lines='{_json.dumps(lines)}'></div>"
@@ -1380,6 +1554,30 @@ def _render_key_levels_panel(snap: "Snapshot") -> str:
         rows.append(_row("Support", sup, "#22c55e"))
     for res in (snap.resistance_levels or [])[-3:]:
         rows.append(_row("Resistance", res, "#ef4444"))
+    # Wave 1: Fibonacci ladder — show the nearest above and nearest below the
+    # current price (the active fib zone — where the operator is decision-making).
+    fib_data = getattr(snap, "fib", None)
+    if fib_data and fib_data.get("retracements"):
+        all_fibs = list(fib_data["retracements"].items()) + list((fib_data.get("extensions") or {}).items())
+        below = [(pct, float(v)) for pct, v in all_fibs if float(v) < px]
+        above = [(pct, float(v)) for pct, v in all_fibs if float(v) > px]
+        below.sort(key=lambda x: x[1], reverse=True)
+        above.sort(key=lambda x: x[1])
+        # Show up to 2 closest fibs below + 2 closest fibs above
+        for pct, v in below[:2]:
+            rows.append(_row(f"Fib {pct} (support)", v, "#fbbf24"))
+        for pct, v in above[:2]:
+            rows.append(_row(f"Fib {pct} (resist)", v, "#fbbf24"))
+    # VWAP anchored
+    vwap = getattr(snap, "vwap_anchored", None)
+    if vwap is not None:
+        rows.append(_row("VWAP (anchored)", float(vwap), "#3b82f6"))
+    # Pivot Points — show PP, R1, S1 (the most-respected three)
+    pivots = getattr(snap, "pivots", None)
+    if pivots:
+        rows.append(_row("PP", pivots.get("pp"), "#e2e8f0"))
+        rows.append(_row("R1 (pivot)", pivots.get("r1"), "#ef4444"))
+        rows.append(_row("S1 (pivot)", pivots.get("s1"), "#22c55e"))
     return (
         '<div class="key-levels"><div class="kl-head">📐 Key Levels (with distance from current)</div>'
         f'<div class="setup-grid">{"".join(rows)}</div></div>'
@@ -1494,21 +1692,70 @@ def render_html(
 
     def _chart_price_lines(s_list: list, snap: Optional["Snapshot"]) -> list[dict]:
         """Build the list of horizontal price lines for a Lightweight Charts pane.
-        Combines all setups' entry/stop/targets PLUS support/resistance from snap.
+        Combines:
+          • Setup entry/stop/targets (yellow/red/green solid)
+          • Recent swing S/R (faint green/red dashed)
+          • Full Fibonacci ladder + extensions from 52-week swing (yellow dashed)
+          • Pivot Points PP/R1/R2/S1/S2 (white/red/green dashed)
+          • Anchored VWAP (blue solid)
+          • Round numbers (gray very faint dashed)
         Each line: {price, color, lineStyle (0=solid,2=dashed), lineWidth, title}.
         """
         lines: list[dict] = []
         for s in s_list:
-            tone = "#22c55e" if s.direction == "long" else "#ef4444"
             lines.append({"price": s.entry,     "color": "#fbbf24", "lineStyle": 0, "lineWidth": 2, "title": f"Entry ${s.entry:.2f}"})
             lines.append({"price": s.stop_loss, "color": "#ef4444", "lineStyle": 0, "lineWidth": 2, "title": f"Stop ${s.stop_loss:.2f}"})
             for ti, t in enumerate(s.targets[:2], 1):
                 lines.append({"price": t,       "color": "#22c55e", "lineStyle": 2, "lineWidth": 2, "title": f"T{ti} ${t:.2f}"})
         if snap is not None:
+            # Swing S/R clusters (existing)
             for sup in (snap.support_levels or [])[-3:]:
                 lines.append({"price": sup, "color": "#22c55e88", "lineStyle": 2, "lineWidth": 1, "title": f"S ${sup:.2f}"})
             for res in (snap.resistance_levels or [])[-3:]:
                 lines.append({"price": res, "color": "#ef444488", "lineStyle": 2, "lineWidth": 1, "title": f"R ${res:.2f}"})
+            # Fibonacci retracements + extensions from 52-week swing
+            if snap.fib and snap.fib.get("retracements"):
+                for pct, px in snap.fib["retracements"].items():
+                    # Highlight 0.618 + 0.66 (CC region) brighter
+                    is_cc = pct in ("0.618", "0.660")
+                    lines.append({
+                        "price": float(px),
+                        "color": "#fbbf24" if is_cc else "#fbbf2488",
+                        "lineStyle": 2,
+                        "lineWidth": 2 if is_cc else 1,
+                        "title": f"Fib {pct} ${float(px):.2f}",
+                    })
+                for pct, px in (snap.fib.get("extensions") or {}).items():
+                    lines.append({
+                        "price": float(px),
+                        "color": "#f97316aa",       # orange for extensions
+                        "lineStyle": 2, "lineWidth": 1,
+                        "title": f"Fib ext {pct} ${float(px):.2f}",
+                    })
+            # Pivot Points (PP white, R red, S green) — all dashed thin
+            if snap.pivots:
+                p = snap.pivots
+                lines.append({"price": p["pp"], "color": "#e2e8f0", "lineStyle": 2, "lineWidth": 1, "title": f"PP ${p['pp']:.2f}"})
+                for key, label in [("r1","R1"),("r2","R2"),("s1","S1"),("s2","S2")]:
+                    if key in p:
+                        color = "#ef444466" if key.startswith("r") else "#22c55e66"
+                        lines.append({"price": p[key], "color": color, "lineStyle": 2, "lineWidth": 1, "title": f"{label} ${p[key]:.2f}"})
+            # Anchored VWAP — solid blue
+            if snap.vwap_anchored is not None:
+                lines.append({
+                    "price": float(snap.vwap_anchored),
+                    "color": "#3b82f6",
+                    "lineStyle": 0, "lineWidth": 2,
+                    "title": f"VWAP ${float(snap.vwap_anchored):.2f}",
+                })
+            # Round numbers (very subtle gray dashed)
+            for rn in (snap.round_numbers or [])[:6]:
+                lines.append({
+                    "price": float(rn),
+                    "color": "#94a3b822",     # very faint
+                    "lineStyle": 2, "lineWidth": 1,
+                    "title": f"${float(rn):.0f}",
+                })
         return lines
 
     # --- One Lightweight Charts chart per ticker with a setup
@@ -3195,6 +3442,20 @@ def run_full_scan(
                 avg_vol = float(daily_df["volume"].iloc[-21:-1].mean())
         except Exception:
             pass
+        # Wave 1: comprehensive level overlays
+        try:
+            fib_data = compute_fib_levels(daily_df, lookback_bars=250)
+        except Exception:
+            fib_data = None
+        try:
+            pivots_data = compute_pivot_points(daily_df)
+        except Exception:
+            pivots_data = None
+        try:
+            vwap_val = compute_anchored_vwap(daily_df, lookback_bars=250)
+        except Exception:
+            vwap_val = None
+        round_nums = compute_round_numbers(px, count=3)
         return Snapshot(
             symbol=sym_u,
             current_price=px,
@@ -3202,6 +3463,8 @@ def run_full_scan(
             support_levels=sr.get("support", [])[-3:],
             resistance_levels=sr.get("resistance", [])[-3:],
             bid=bid, ask=ask, spread_pct=spread_pct, avg_volume=avg_vol,
+            fib=fib_data, pivots=pivots_data,
+            vwap_anchored=vwap_val, round_numbers=round_nums,
             context_flags=build_context(
                 daily_df=daily_df, symbol=sym_u,
                 setup_direction="long",
