@@ -3906,7 +3906,8 @@ def render_html(
               <button class="bell-btn" data-symbol="{s.symbol}" data-price="{s.current_price:.2f}" onclick="setAlarm(event,'{s.symbol}',{s.current_price:.2f})">🔔</button>
             </td>
             <td><span class="verdict-pill" style="background:{vcolor};color:#000">{verdict}</span></td>
-            <td><b><a class="sym-link" onclick="document.getElementById('chart-{i}').scrollIntoView({{behavior:'smooth'}})">{s.symbol}</a></b></td>
+            <td><b><a class="sym-link" href="/chart?symbol={s.symbol}" target="_blank" rel="noopener" title="Open full chart in new tab">{s.symbol}</a></b></td>
+            <td><a class="open-chart-mini" href="/chart?symbol={s.symbol}" target="_blank" rel="noopener" title="Open full chart in new tab">📊 Open</a></td>
             <td style="color:{tone}">{arrow} {s.name}</td>
             <td style="text-align:right">${s.current_price:.2f}</td>
             <td style="text-align:right">${s.entry:.2f}</td>
@@ -3917,7 +3918,7 @@ def render_html(
             <td style="font-size:11px;color:#94a3b8">{s.reasoning}<br><i>{s.citation}</i></td>
           </tr>
         """)
-    table_rows = "\n".join(rows) if rows else "<tr><td colspan=11 style='text-align:center;padding:24px;color:#94a3b8'>No setups firing right now — try again later or add more tickers.</td></tr>"
+    table_rows = "\n".join(rows) if rows else "<tr><td colspan=12 style='text-align:center;padding:24px;color:#94a3b8'>No setups firing right now — try again later or add more tickers.</td></tr>"
 
     # Price map exposed to client-side JS for alarm checking
     import json as _json
@@ -4406,6 +4407,9 @@ def render_html(
   .ticker-compact h2 {{ margin:0 0 8px 0; font-size:15px; }}
   .open-chart-btn {{ padding:5px 12px; background:#22c55e; color:#000; text-decoration:none; border-radius:4px; font-size:11px; font-weight:700; font-family:ui-monospace,monospace; }}
   .open-chart-btn:hover {{ background:#16a34a; }}
+  /* Compact Open Chart button for in-table cells (Wave 13.x) */
+  .open-chart-mini {{ padding:3px 8px; background:#22c55e; color:#000; text-decoration:none; border-radius:3px; font-size:10px; font-weight:700; font-family:ui-monospace,monospace; white-space:nowrap; display:inline-block; }}
+  .open-chart-mini:hover {{ background:#16a34a; }}
 
   /* Hybrid chart host — switches between CC LWC view and TradingView widget */
   .chart-host {{ background:#0a0f1c; border-radius:8px; padding:8px; position:relative; }}
@@ -4671,7 +4675,7 @@ def render_html(
     <thead><tr>
       <th>⭐🔔</th>
       <th>Verdict</th>
-      <th>Symbol</th><th>Setup</th>
+      <th>Symbol</th><th>Chart</th><th>Setup</th>
       <th style="text-align:right">Price</th>
       <th style="text-align:right">Entry</th>
       <th style="text-align:right">Stop</th>
