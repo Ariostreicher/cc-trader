@@ -1574,6 +1574,119 @@ def render_html(
         """)
     charts_html = "\n".join(charts)
 
+    # --- Watchlist Monitoring table: a row per scanned ticker, hidden by
+    # default. Client-side JS reads cc_stars from localStorage and shows only
+    # the rows that match. This lets the user see their watchlist as a TABLE
+    # with live price + key levels, regardless of whether a CC setup is firing.
+    watches_by_sym_for_monitor: dict[str, list] = {}
+    for w in watches:
+        watches_by_sym_for_monitor.setdefault(w.symbol, []).append(w)
+
+    def _fmt_pct(val, ref) -> tuple[str, str]:
+        """Return (text, color) for a "$X.XX (↑ +Y.Y%)" cell."""
+        if val is None or ref is None or ref <= 0:
+            return ("—", "#64748b")
+        d = (val - ref) / ref * 100.0
+        arrow = "↑" if d > 0 else ("↓" if d < 0 else "•")
+        sign = "+" if d > 0 else ""
+        return (f"${val:.2f} {arrow} {sign}{d:.1f}%",
+                "#22c55e" if d > 0 else ("#ef4444" if d < 0 else "#94a3b8"))
+
+    monitor_rows = []
+    for sym in sorted(levels_by_symbol.keys()):
+        s = levels_by_symbol[sym]
+        px = s.current_price
+        # Vs EMAs
+        e55_txt, e55_col   = _fmt_pct(s.ema_55,  px)
+        e200_txt, e200_col = _fmt_pct(s.ema_200, px)
+        # RSI with regime color
+        if s.rsi_14 is None:
+            rsi_html = '<span style="color:#64748b">—</span>'
+        else:
+            rc = "#ef4444" if s.rsi_14 > 70 else ("#22c55e" if s.rsi_14 < 30 else "#94a3b8")
+            rsi_html = f'<span style="color:{rc}">{s.rsi_14:.1f}</span>'
+        # Nearest support below, nearest resistance above
+        sup_html = res_html = '<span style="color:#64748b">—</span>'
+        if s.support_levels:
+            top_sup = max(s.support_levels)  # the closest one BELOW price
+            sup_txt, _ = _fmt_pct(top_sup, px)
+            sup_html = f'<span style="color:#22c55e">{sup_txt}</span>'
+        if s.resistance_levels:
+            bot_res = min(s.resistance_levels)  # closest ABOVE price
+            res_txt, _ = _fmt_pct(bot_res, px)
+            res_html = f'<span style="color:#ef4444">{res_txt}</span>'
+        # Forming watch summary
+        wlist = watches_by_sym_for_monitor.get(sym, [])
+        if wlist:
+            forming_html = (f'<span style="color:#fbbf24">▲ {wlist[0].signal}</span>'
+                            if wlist[0].direction == "long"
+                            else f'<span style="color:#f59e0b">▼ {wlist[0].signal}</span>')
+        else:
+            forming_html = '<span style="color:#64748b">—</span>'
+        # Sector
+        etf = SECTOR_ETF.get(sym, "SPY")
+        sector_html = f'<span style="color:#94a3b8">{etf}</span>'
+        # Whether the ticker fired a setup (so we can link to its chart anchor)
+        scrolltarget = ""
+        for i, fired in enumerate(setups_sorted):
+            if fired.symbol == sym:
+                scrolltarget = f"document.getElementById('chart-{i}').scrollIntoView({{behavior:'smooth'}})"
+                break
+        if not scrolltarget:
+            # find its snapshot chart instead — they're appended after fired charts
+            for j, snap in enumerate(snapshots):
+                if snap.symbol == sym:
+                    scrolltarget = f"document.getElementById('chart-{len(seen_symbols)+j}').scrollIntoView({{behavior:'smooth'}})"
+                    break
+        view_btn = (f'<button class="mon-btn" onclick="{scrolltarget}">📊 Chart</button>'
+                    if scrolltarget else
+                    '<button class="mon-btn" disabled style="opacity:0.4">no chart</button>')
+
+        monitor_rows.append(f"""
+          <tr class="monitor-row" data-symbol="{sym}" style="display:none">
+            <td class="actions">
+              <button class="star-btn" data-symbol="{sym}" onclick="toggleStar(event,'{sym}')">☆</button>
+              <button class="bell-btn" data-symbol="{sym}" data-price="{px:.2f}" onclick="setAlarm(event,'{sym}',{px:.2f})">🔔</button>
+            </td>
+            <td><b>{sym}</b></td>
+            <td style="text-align:right">${px:.2f}</td>
+            <td style="text-align:right;color:{e55_col};font-family:ui-monospace,monospace">{e55_txt}</td>
+            <td style="text-align:right;color:{e200_col};font-family:ui-monospace,monospace">{e200_txt}</td>
+            <td style="text-align:right">{rsi_html}</td>
+            <td style="text-align:right">{sup_html}</td>
+            <td style="text-align:right">{res_html}</td>
+            <td>{sector_html}</td>
+            <td>{forming_html}</td>
+            <td style="white-space:nowrap">
+              <button class="mon-btn" onclick="openManualSetupModal('{sym}',{px:.2f})">✎ Setup</button>
+              {view_btn}
+            </td>
+          </tr>
+        """)
+
+    monitor_table_html = f"""
+    <h2 style="margin-top:32px">📡 My Watchlist — Live Monitoring <span class="sub" id="monitor-count">(empty)</span></h2>
+    <div id="monitor-empty" class="journal-empty" style="display:none">
+      Your watchlist is empty. Star any ticker (☆) below to monitor it here, or use <b>+ Add ticker</b>.
+    </div>
+    <table id="monitor-table" style="display:none">
+      <thead><tr>
+        <th>⭐🔔</th>
+        <th>Symbol</th>
+        <th style="text-align:right">Price</th>
+        <th style="text-align:right">vs EMA 55</th>
+        <th style="text-align:right">vs EMA 200</th>
+        <th style="text-align:right">RSI</th>
+        <th style="text-align:right">Nearest Support</th>
+        <th style="text-align:right">Nearest Resistance</th>
+        <th>Sector</th>
+        <th>Forming Setup</th>
+        <th>Action</th>
+      </tr></thead>
+      <tbody>{''.join(monitor_rows)}</tbody>
+    </table>
+    """
+
     # --- Watching section: setups that are FORMING but not yet firing.
     # Group by symbol so each ticker appears once with all its watch items.
     watches_by_sym: dict[str, list] = {}
@@ -1806,6 +1919,14 @@ def render_html(
   .setup-actions .take-btn {{ border-color:#22c55e; color:#22c55e; }}
   .setup-actions .take-btn:hover {{ background:#22c55e; color:#000; }}
 
+  /* Monitor table — watchlist live snapshot rows */
+  #monitor-table {{ margin-top:6px; }}
+  #monitor-table th {{ font-size:10px; }}
+  #monitor-table td {{ font-size:12px; padding:8px 12px; }}
+  .monitor-row:hover {{ background:#111827; }}
+  .mon-btn {{ padding:3px 8px; border-radius:4px; border:1px solid #1e293b; background:#0a0f1c; color:#94a3b8; cursor:pointer; font-size:10px; font-family:ui-monospace,monospace; margin-right:3px; }}
+  .mon-btn:hover {{ background:#1e293b; color:#e2e8f0; }}
+
   /* Snapshot card action buttons (star, bell, +list, +setup) */
   .snap-actions {{ display:flex; gap:4px; align-items:center; }}
   .snap-actions .star-btn, .snap-actions .bell-btn {{ font-size:16px; padding:2px 4px; }}
@@ -1923,6 +2044,8 @@ def render_html(
     </tr></thead>
     <tbody>{table_rows}</tbody>
   </table>
+
+  {monitor_table_html}
 
   {charts_html}
 
@@ -2104,6 +2227,37 @@ def render_html(
       applyStarUI();
       applyFilter();
       renderMyListBar();
+      renderMonitorTable();
+    }}
+
+    // --- Watchlist Monitoring table -------------------------------------
+    // Server pre-renders 1 row per scanned ticker, hidden. We show only the
+    // rows whose symbol is in cc_stars.
+    function renderMonitorTable() {{
+      const stars = new Set(getStars());
+      const table = document.getElementById('monitor-table');
+      const empty = document.getElementById('monitor-empty');
+      const label = document.getElementById('monitor-count');
+      if (!table) return;
+      let shown = 0;
+      document.querySelectorAll('.monitor-row').forEach(tr => {{
+        const sym = tr.dataset.symbol;
+        if (stars.has(sym)) {{
+          tr.style.display = '';
+          shown++;
+        }} else {{
+          tr.style.display = 'none';
+        }}
+      }});
+      if (shown === 0) {{
+        table.style.display = 'none';
+        if (empty) empty.style.display = '';
+        if (label) label.textContent = '(empty)';
+      }} else {{
+        table.style.display = '';
+        if (empty) empty.style.display = 'none';
+        if (label) label.textContent = '(' + shown + ' ' + (shown === 1 ? 'stock' : 'stocks') + ')';
+      }}
     }}
 
     // --- Custom watchlist (= the user's stars) ----------------------------
@@ -2139,12 +2293,14 @@ def render_html(
       saveStars(stars);
       applyStarUI();
       renderMyListBar();
+      renderMonitorTable();
     }}
     function removeFromMyList(sym) {{
       saveStars(getStars().filter(s => s !== sym));
       applyStarUI();
       renderMyListBar();
       applyFilter();
+      renderMonitorTable();
     }}
     function clearMyList() {{
       if (!confirm('Remove ALL tickers from your watchlist?')) return;
@@ -2152,6 +2308,7 @@ def render_html(
       applyStarUI();
       renderMyListBar();
       applyFilter();
+      renderMonitorTable();
     }}
     function scanMyList() {{
       const stars = getStars();
@@ -2423,6 +2580,7 @@ def render_html(
       saveStars(stars);
       applyStarUI();
       renderMyListBar();
+      renderMonitorTable();
       showToast('⭐ ' + sym + ' added to your watchlist');
     }}
 
@@ -2527,6 +2685,7 @@ def render_html(
         saveStars(stars);
         applyStarUI();
         renderMyListBar();
+        renderMonitorTable();
       }}
       closeManualSetupModal();
       renderManualSetups();
@@ -2630,6 +2789,7 @@ def render_html(
       applyFilter();
       checkAlarms();
       renderMyListBar();
+      renderMonitorTable();
       initLightweightCharts();
       loadSavedAccount();
       renderJournal();
