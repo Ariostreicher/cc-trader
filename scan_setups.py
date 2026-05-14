@@ -369,12 +369,28 @@ def compute_round_numbers(price: float, count: int = 3) -> List[float]:
 # After running `python scan_setups.py --backtest`, real numbers replace these.
 # ---------------------------------------------------------------------------
 BACKTESTED_CONVICTION: dict[str, float] = {
-    "EMA Pullback":  0.62,    # prior — backtest will refine
-    "CC Region":     0.64,
-    "S/R Flip":      0.60,
-    "Volume Spike":  0.58,
-    "Inside Day":    0.55,
-    "RSI Reversal":  0.48,
+    # Wave 0 — original CC patterns
+    "EMA Pullback":      0.62,
+    "CC Region":         0.64,
+    "S/R Flip":          0.60,
+    "Volume Spike":      0.58,
+    "Inside Day":        0.55,
+    "RSI Reversal":      0.48,
+    # Wave 2
+    "3rd Touch":         0.66,    # CC explicitly calls this highest probability
+    "Trendline Break":   0.60,
+    "ORB":               0.58,
+    # Wave 3 — Smart Money Concepts
+    "BoS":               0.62,
+    "ChoCh":             0.54,    # reversals are inherently lower win-rate
+    "Liquidity Grab":    0.58,
+    "Order Block":       0.60,
+    "FVG":               0.56,
+    # Bonus
+    "Wyckoff":           0.60,
+    "Three Drives":      0.52,
+    "Channel":           0.56,
+    "VolProfile":        0.54,
 }
 
 # Load saved backtest results if present (written by run_backtest()).
@@ -486,6 +502,230 @@ def bar_pattern(df: pd.DataFrame) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Wave 2 + Wave 3 helpers — market structure, FVGs, order blocks, volume
+# profile, trendlines. These are the foundations for the next round of
+# detectors and reflect deeper CC methodology than the EMA/ATR shortcuts.
+# ---------------------------------------------------------------------------
+def classify_market_structure(df: pd.DataFrame, lookback: int = 150, n: int = 5) -> List[dict]:
+    """Walk the swing pivots from oldest to newest and classify each one
+    relative to the previous SAME-KIND pivot:
+      HH = high higher than previous high
+      LH = high lower than previous high
+      HL = low higher than previous low
+      LL = low lower than previous low
+    The sequence of these tags is the market structure. An uptrend is a string
+    of HH/HL; a downtrend is LH/LL. A break of structure (BoS) confirms the
+    trend; a change of character (ChoCh) flips it.
+    Returns a list of dicts:
+      [{idx, price, kind: 'high'|'low', label: 'HH'|'LH'|'HL'|'LL'}, ...]
+    """
+    pivots = swing_pivots(df.tail(lookback), n=n)
+    out: list[dict] = []
+    last_high = None
+    last_low = None
+    for p in pivots:
+        if p.kind == "high":
+            label = "HH" if last_high is not None and p.price > last_high else (
+                    "LH" if last_high is not None else "H?")
+            last_high = p.price
+        else:
+            label = "HL" if last_low is not None and p.price > last_low else (
+                    "LL" if last_low is not None else "L?")
+            last_low = p.price
+        out.append({"idx": p.idx, "price": p.price, "kind": p.kind, "label": label})
+    return out
+
+
+def detect_trend_from_structure(structure: List[dict]) -> str:
+    """Return 'up', 'down', or 'range' based on the last 4 pivots' labels.
+    Uptrend = predominantly HH/HL. Downtrend = LH/LL. Mixed = range.
+    """
+    if not structure:
+        return "range"
+    recent = structure[-6:]
+    labels = [s["label"] for s in recent if s["label"] in ("HH","HL","LH","LL")]
+    if not labels:
+        return "range"
+    bull = sum(1 for l in labels if l in ("HH","HL"))
+    bear = sum(1 for l in labels if l in ("LH","LL"))
+    if bull >= bear * 2 and bull >= 2:
+        return "up"
+    if bear >= bull * 2 and bear >= 2:
+        return "down"
+    return "range"
+
+
+def find_fvgs(df: pd.DataFrame, lookback: int = 100) -> List[dict]:
+    """Detect Fair Value Gaps in the recent `lookback` bars. A bullish FVG is
+    a 3-bar pattern where bar[0].high < bar[2].low (price moved up so fast it
+    left an imbalance). Bearish FVG: bar[0].low > bar[2].high.
+    Returns:
+      [{idx, kind: 'bull'|'bear', top, bot, filled: bool}, ...]
+    The `filled` flag is True if a later bar's range crossed back through
+    the gap zone (in which case the FVG has been mitigated).
+    """
+    out: list[dict] = []
+    if df is None or df.empty or len(df) < 4:
+        return out
+    window = df.tail(lookback).reset_index(drop=False)
+    n = len(window)
+    for i in range(n - 2):
+        b0 = window.iloc[i]
+        b1 = window.iloc[i + 1]
+        b2 = window.iloc[i + 2]
+        # Bullish FVG: gap between b0.high and b2.low
+        if b0["high"] < b2["low"]:
+            top = float(b2["low"])
+            bot = float(b0["high"])
+            mid = (top + bot) / 2.0
+            # Check if any later bar reached back into the gap (mitigation)
+            later = window.iloc[i + 3:]
+            filled = (not later.empty) and bool((later["low"] <= mid).any())
+            out.append({"idx": i + 1, "kind": "bull", "top": top, "bot": bot, "filled": filled})
+        # Bearish FVG
+        if b0["low"] > b2["high"]:
+            top = float(b0["low"])
+            bot = float(b2["high"])
+            mid = (top + bot) / 2.0
+            later = window.iloc[i + 3:]
+            filled = (not later.empty) and bool((later["high"] >= mid).any())
+            out.append({"idx": i + 1, "kind": "bear", "top": top, "bot": bot, "filled": filled})
+    return out
+
+
+def find_order_blocks(df: pd.DataFrame, lookback: int = 100, impulse_atrs: float = 2.0) -> List[dict]:
+    """An institutional order block is the LAST opposite-color candle BEFORE a
+    strong impulsive move. Bullish OB = last red candle before a rally of
+    ≥ impulse_atrs × ATR over the next ~3 bars. Bearish OB = mirror.
+    Returns:
+      [{idx, kind: 'bull'|'bear', top, bot, mid, broken: bool}, ...]
+    `broken` is True if price has since traded through the OB (mitigated).
+    """
+    out: list[dict] = []
+    if df is None or df.empty or len(df) < 30:
+        return out
+    a = atr(df, 14)
+    window = df.tail(lookback).reset_index(drop=False)
+    atr_w = a.tail(lookback).reset_index(drop=True)
+    n = len(window)
+    for i in range(2, n - 4):
+        atrv = float(atr_w.iloc[i]) if i < len(atr_w) and pd.notna(atr_w.iloc[i]) else 0
+        if atrv <= 0:
+            continue
+        b = window.iloc[i]
+        # Look at next 3 bars cumulative move
+        future = window.iloc[i + 1: i + 5]
+        if future.empty:
+            continue
+        move_up = float(future["high"].max() - b["close"])
+        move_dn = float(b["close"] - future["low"].min())
+        # Bullish OB: this bar is RED (close<open) and next 3 bars rally ≥ N ATR
+        if b["close"] < b["open"] and move_up >= impulse_atrs * atrv:
+            top = float(b["high"])
+            bot = float(b["low"])
+            later = window.iloc[i + 5:]
+            broken = (not later.empty) and bool((later["low"] <= bot).any())
+            out.append({"idx": i, "kind": "bull", "top": top, "bot": bot,
+                        "mid": (top + bot) / 2.0, "broken": broken})
+        # Bearish OB: this bar is GREEN (close>open) and next 3 bars drop ≥ N ATR
+        if b["close"] > b["open"] and move_dn >= impulse_atrs * atrv:
+            top = float(b["high"])
+            bot = float(b["low"])
+            later = window.iloc[i + 5:]
+            broken = (not later.empty) and bool((later["high"] >= top).any())
+            out.append({"idx": i, "kind": "bear", "top": top, "bot": bot,
+                        "mid": (top + bot) / 2.0, "broken": broken})
+    return out
+
+
+def compute_volume_profile(df: pd.DataFrame, lookback_bars: int = 60, bins: int = 40) -> dict:
+    """Compute a simple Volume Profile over the last `lookback_bars`:
+      • POC = price bin with the highest traded volume
+      • VAH/VAL = Value Area High/Low — the band around POC containing 70% of volume
+    Volume is approximated as evenly distributed within each bar's H–L range
+    (standard simplification when only OHLCV is available).
+    """
+    if df is None or df.empty or len(df) < 10 or "volume" not in df.columns:
+        return {}
+    window = df.tail(lookback_bars).copy()
+    lo = float(window["low"].min())
+    hi = float(window["high"].max())
+    if hi <= lo:
+        return {}
+    edges = np.linspace(lo, hi, bins + 1)
+    vol_per_bin = np.zeros(bins)
+    for _, row in window.iterrows():
+        # Distribute the bar's volume across the bins it spans
+        b_lo, b_hi, v = float(row["low"]), float(row["high"]), float(row["volume"] or 0)
+        if v <= 0 or b_hi <= b_lo:
+            continue
+        i0 = max(0, int((b_lo - lo) / (hi - lo) * bins))
+        i1 = min(bins - 1, int((b_hi - lo) / (hi - lo) * bins))
+        if i1 <= i0:
+            vol_per_bin[i0] += v
+            continue
+        spread = i1 - i0 + 1
+        per = v / spread
+        for k in range(i0, i1 + 1):
+            vol_per_bin[k] += per
+    poc_idx = int(vol_per_bin.argmax())
+    poc = (edges[poc_idx] + edges[poc_idx + 1]) / 2.0
+    total_v = vol_per_bin.sum()
+    if total_v <= 0:
+        return {"poc": poc}
+    # Expand outward from POC until we capture 70% of total volume
+    target = 0.70 * total_v
+    captured = vol_per_bin[poc_idx]
+    lo_i, hi_i = poc_idx, poc_idx
+    while captured < target and (lo_i > 0 or hi_i < bins - 1):
+        next_lo = vol_per_bin[lo_i - 1] if lo_i > 0 else -1
+        next_hi = vol_per_bin[hi_i + 1] if hi_i < bins - 1 else -1
+        if next_hi >= next_lo and hi_i < bins - 1:
+            hi_i += 1
+            captured += vol_per_bin[hi_i]
+        elif lo_i > 0:
+            lo_i -= 1
+            captured += vol_per_bin[lo_i]
+        else:
+            break
+    val = edges[lo_i]
+    vah = edges[hi_i + 1]
+    return {"poc": float(poc), "vah": float(vah), "val": float(val),
+            "lookback_bars": lookback_bars}
+
+
+def fit_trendline(df: pd.DataFrame, kind: str = "support", lookback: int = 60, n: int = 5) -> Optional[dict]:
+    """Fit a simple trendline through the 2 most recent swing lows (support)
+    or swing highs (resistance) in the lookback window.
+    Returns {slope, intercept, value_at_last_bar, anchor_a, anchor_b}, or None
+    if there aren't enough pivots of the requested kind.
+    """
+    pivots = swing_pivots(df.tail(lookback), n=n)
+    same = [p for p in pivots if p.kind == ("low" if kind == "support" else "high")]
+    if len(same) < 2:
+        return None
+    a, b = same[-2], same[-1]
+    # Use integer bar offsets as x (df.index might be datetime). Convert pivot
+    # times to absolute positions.
+    window = df.tail(lookback)
+    try:
+        pos_a = window.index.get_loc(a.idx)
+        pos_b = window.index.get_loc(b.idx)
+    except KeyError:
+        return None
+    if pos_b == pos_a:
+        return None
+    slope = (b.price - a.price) / (pos_b - pos_a)
+    intercept = a.price - slope * pos_a
+    last_pos = len(window) - 1
+    value_now = slope * last_pos + intercept
+    return {"slope": slope, "intercept": intercept,
+            "value_at_last_bar": float(value_now),
+            "anchor_a": {"price": a.price, "pos": pos_a},
+            "anchor_b": {"price": b.price, "pos": pos_b}}
+
+
+# ---------------------------------------------------------------------------
 # Detectors — Chart Champions rules
 # ---------------------------------------------------------------------------
 def detect_ema_pullback(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
@@ -589,12 +829,16 @@ def detect_cc_region_pullback(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
 def detect_sr_flip(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
     """First 18.pdf p.61 — broken level retested in the opposite role.
     Requires volume confirmation + a confirming bar pattern."""
+    if df is None or df.empty or len(df) < 20:
+        return None
     sr = support_resistance(df.tail(200))
     last = df.iloc[-1]
     px = float(last["close"])
     lo = float(last["low"])
     hi = float(last["high"])
     atrv = float(atr(df, 14).iloc[-1])
+    if pd.isna(atrv):
+        return None
     if not volume_confirmed(df):
         return None
     pat = bar_pattern(df)
@@ -748,13 +992,559 @@ def detect_rsi_reversal(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Wave 2 — 3rd touch, trendline break+retest, ORB
+# ---------------------------------------------------------------------------
+def detect_third_touch(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """CC: 'The 3rd touch is the highest-probability touch.' We find any level
+    that has been touched exactly TWICE in the past 100 bars and the current
+    bar is now approaching that level for the 3rd time."""
+    if df is None or df.empty or len(df) < 30:
+        return None
+    if not volume_confirmed(df):
+        return None
+    last = df.iloc[-1]
+    px = float(last["close"])
+    atrv = float(atr(df, 14).iloc[-1])
+    base = BACKTESTED_CONVICTION.get("3rd Touch", 0.66)
+    pat = bar_pattern(df)
+    pivots = swing_pivots(df.tail(120), n=4)
+    tol = max(atrv * 0.5, px * 0.005)
+    # Group pivots by price into clusters
+    clusters: list[list] = []
+    for p in pivots:
+        attached = False
+        for cl in clusters:
+            avg = sum(x.price for x in cl) / len(cl)
+            if abs(p.price - avg) <= tol:
+                cl.append(p); attached = True; break
+        if not attached:
+            clusters.append([p])
+    for cl in clusters:
+        if len(cl) != 2:
+            continue
+        level = sum(x.price for x in cl) / 2.0
+        kinds = [x.kind for x in cl]
+        # Approaching the level for 3rd touch when price is within 0.7 ATR
+        if abs(px - level) > 0.7 * atrv:
+            continue
+        # All highs cluster → resistance test, look for SHORT
+        if all(k == "high" for k in kinds) and px <= level:
+            stop = level + 0.5 * atrv
+            targets = smart_targets_short(df, px, stop)
+            conv = base + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
+            return Setup(symbol, f"3rd Touch @ ${level:.2f} (short)", "short",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=min(0.90, conv - 0.05),
+                reasoning=f"Price approaching ${level:.2f} for 3rd time — 2 prior rejections at this level. Bar: {pat}.",
+                citation="First 18.pdf p.66 — 3rd touch is highest probability")
+        # All lows cluster → support test, look for LONG
+        if all(k == "low" for k in kinds) and px >= level:
+            stop = level - 0.5 * atrv
+            targets = smart_targets_long(df, px, stop)
+            conv = base + (0.10 if pat in ("hammer", "engulfing") else 0.0)
+            return Setup(symbol, f"3rd Touch @ ${level:.2f} (long)", "long",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=min(0.90, conv),
+                reasoning=f"Price approaching ${level:.2f} for 3rd time — 2 prior holds at this level. Bar: {pat}.",
+                citation="First 18.pdf p.66 — 3rd touch is highest probability")
+    return None
+
+
+def detect_trendline_break(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Detect a broken trendline followed by a retest. CC: 'A broken trendline
+    becomes the opposite-role level on retest.' If the support trendline was
+    broken below and price has now retraced UP to the line, we're SHORT. If a
+    resistance trendline was broken above and price retraced back DOWN, LONG."""
+    if df is None or df.empty or len(df) < 30:
+        return None
+    if not volume_confirmed(df):
+        return None
+    last = df.iloc[-1]
+    px = float(last["close"])
+    atrv = float(atr(df, 14).iloc[-1])
+    base = BACKTESTED_CONVICTION.get("Trendline Break", 0.60)
+    pat = bar_pattern(df)
+    # Support trendline (rising lows) — if broken below + now retest from below
+    tl_sup = fit_trendline(df, kind="support", lookback=80)
+    if tl_sup is not None:
+        line = tl_sup["value_at_last_bar"]
+        # Was broken: at least one of the last 5 bars closed below the line
+        last5 = df.tail(5)
+        broken = bool((last5["close"] < line - 0.3 * atrv).any())
+        if broken and abs(px - line) <= 0.5 * atrv and px <= line:
+            stop = line + 0.7 * atrv
+            targets = smart_targets_short(df, px, stop)
+            conv = base + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
+            return Setup(symbol, "Broken trendline retest (short)", "short",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=min(0.88, conv - 0.05),
+                reasoning=f"Rising support trendline broken; price retesting from below at ${line:.2f}. Bar: {pat}.",
+                citation="First 18.pdf — trendline role reversal")
+    # Resistance trendline (falling highs) — if broken above + now retest from above
+    tl_res = fit_trendline(df, kind="resistance", lookback=80)
+    if tl_res is not None:
+        line = tl_res["value_at_last_bar"]
+        last5 = df.tail(5)
+        broken = bool((last5["close"] > line + 0.3 * atrv).any())
+        if broken and abs(px - line) <= 0.5 * atrv and px >= line:
+            stop = line - 0.7 * atrv
+            targets = smart_targets_long(df, px, stop)
+            conv = base + (0.10 if pat in ("hammer", "engulfing") else 0.0)
+            return Setup(symbol, "Broken trendline retest (long)", "long",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=min(0.88, conv),
+                reasoning=f"Falling resistance trendline broken; price retesting from above at ${line:.2f}. Bar: {pat}.",
+                citation="First 18.pdf — trendline role reversal")
+    return None
+
+
+def detect_orb_breakout(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Opening Range Breakout — adapted for daily bars. The 'opening range' is
+    the prior 5 trading days; today's close breaking that range with volume
+    is the signal. This is the daily-bar version of the classic intraday ORB."""
+    if df is None or df.empty or len(df) < 8:
+        return None
+    if not volume_confirmed(df, threshold=1.2):
+        return None
+    last = df.iloc[-1]
+    px = float(last["close"])
+    atrv = float(atr(df, 14).iloc[-1])
+    base = BACKTESTED_CONVICTION.get("ORB", 0.58)
+    pat = bar_pattern(df)
+    # 5-bar range (the "opening range")
+    rng = df.iloc[-6:-1]
+    rng_hi = float(rng["high"].max())
+    rng_lo = float(rng["low"].min())
+    if px > rng_hi:
+        stop = rng_lo - 0.3 * atrv
+        targets = smart_targets_long(df, px, stop)
+        conv = base + (0.10 if pat == "engulfing" else 0.0)
+        return Setup(symbol, "ORB Breakout (long)", "long",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=min(0.88, conv),
+            reasoning=f"Break above 5-bar opening range ${rng_lo:.2f}–${rng_hi:.2f} on confirming volume. Bar: {pat}.",
+            citation="Second 18.pdf — Opening Range Breakout")
+    if px < rng_lo:
+        stop = rng_hi + 0.3 * atrv
+        targets = smart_targets_short(df, px, stop)
+        conv = base + (0.10 if pat == "engulfing" else 0.0)
+        return Setup(symbol, "ORB Breakdown (short)", "short",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=min(0.88, conv - 0.05),
+            reasoning=f"Break below 5-bar opening range ${rng_lo:.2f}–${rng_hi:.2f} on confirming volume. Bar: {pat}.",
+            citation="Second 18.pdf — Opening Range Breakdown")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Wave 3 — BoS, ChoCh, liquidity grabs, order blocks, FVGs
+# ---------------------------------------------------------------------------
+def detect_bos(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Break of Structure — in an uptrend (HH/HL series), price closes above
+    the most recent swing HIGH. Confirms trend continuation."""
+    if df is None or df.empty or len(df) < 30:
+        return None
+    if not volume_confirmed(df):
+        return None
+    structure = classify_market_structure(df, lookback=120, n=4)
+    trend = detect_trend_from_structure(structure)
+    if trend == "range":
+        return None
+    last = df.iloc[-1]
+    px = float(last["close"])
+    atrv = float(atr(df, 14).iloc[-1])
+    base = BACKTESTED_CONVICTION.get("BoS", 0.62)
+    pat = bar_pattern(df)
+    # Find most recent swing high and most recent swing low
+    last_high = next((s for s in reversed(structure) if s["kind"] == "high"), None)
+    last_low  = next((s for s in reversed(structure) if s["kind"] == "low"),  None)
+    if last_high is None or last_low is None:
+        return None
+    if trend == "up" and px > last_high["price"] and px - last_high["price"] <= 0.5 * atrv:
+        stop = last_low["price"] - 0.2 * atrv
+        targets = smart_targets_long(df, px, stop)
+        conv = base + (0.10 if pat == "engulfing" else 0.0)
+        return Setup(symbol, "BoS (continuation long)", "long",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=min(0.90, conv),
+            reasoning=f"Uptrend BoS — price closed above prior swing high ${last_high['price']:.2f}, structure intact. Bar: {pat}.",
+            citation="Smart Money Concepts — Break of Structure")
+    if trend == "down" and px < last_low["price"] and last_low["price"] - px <= 0.5 * atrv:
+        stop = last_high["price"] + 0.2 * atrv
+        targets = smart_targets_short(df, px, stop)
+        conv = base + (0.10 if pat == "engulfing" else 0.0)
+        return Setup(symbol, "BoS (continuation short)", "short",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=min(0.90, conv - 0.05),
+            reasoning=f"Downtrend BoS — price closed below prior swing low ${last_low['price']:.2f}. Bar: {pat}.",
+            citation="Smart Money Concepts — Break of Structure")
+    return None
+
+
+def detect_choch(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Change of Character — established uptrend breaks below an HL (lower
+    low for the first time), or downtrend breaks above an LH. Early reversal
+    signal — more risk than BoS but higher reward."""
+    if df is None or df.empty or len(df) < 40:
+        return None
+    if not volume_confirmed(df):
+        return None
+    structure = classify_market_structure(df, lookback=150, n=4)
+    trend = detect_trend_from_structure(structure[:-1] if len(structure) > 4 else structure)
+    if trend == "range" or len(structure) < 4:
+        return None
+    last = df.iloc[-1]
+    px = float(last["close"])
+    atrv = float(atr(df, 14).iloc[-1])
+    base = BACKTESTED_CONVICTION.get("ChoCh", 0.54)
+    pat = bar_pattern(df)
+    # In an uptrend, the most recent HL is the structural support to watch.
+    if trend == "up":
+        last_HL = next((s for s in reversed(structure) if s["label"] == "HL"), None)
+        if last_HL and px < last_HL["price"] and last_HL["price"] - px <= 0.7 * atrv:
+            last_high_after = next((s for s in reversed(structure) if s["kind"] == "high"), None)
+            stop = (last_high_after["price"] + 0.3 * atrv) if last_high_after else px + atrv
+            targets = smart_targets_short(df, px, stop)
+            conv = base + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
+            return Setup(symbol, "ChoCh (reversal short)", "short",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=min(0.85, conv - 0.05),
+                reasoning=f"Uptrend ChoCh — price broke below structural HL ${last_HL['price']:.2f}. Bar: {pat}.",
+                citation="Smart Money Concepts — Change of Character")
+    if trend == "down":
+        last_LH = next((s for s in reversed(structure) if s["label"] == "LH"), None)
+        if last_LH and px > last_LH["price"] and px - last_LH["price"] <= 0.7 * atrv:
+            last_low_after = next((s for s in reversed(structure) if s["kind"] == "low"), None)
+            stop = (last_low_after["price"] - 0.3 * atrv) if last_low_after else px - atrv
+            targets = smart_targets_long(df, px, stop)
+            conv = base + (0.10 if pat in ("hammer", "engulfing") else 0.0)
+            return Setup(symbol, "ChoCh (reversal long)", "long",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=min(0.85, conv),
+                reasoning=f"Downtrend ChoCh — price broke above structural LH ${last_LH['price']:.2f}. Bar: {pat}.",
+                citation="Smart Money Concepts — Change of Character")
+    return None
+
+
+def detect_liquidity_grab(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Stop hunt / liquidity grab. The current bar wicks BEYOND a prior swing
+    extreme (above last high or below last low) but CLOSES back inside the
+    range. Classic reversal signal — institutions take out retail stops."""
+    if df is None or df.empty or len(df) < 30:
+        return None
+    last = df.iloc[-1]
+    px = float(last["close"])
+    hi = float(last["high"])
+    lo = float(last["low"])
+    atrv = float(atr(df, 14).iloc[-1])
+    base = BACKTESTED_CONVICTION.get("Liquidity Grab", 0.58)
+    pat = bar_pattern(df)
+    pivots = swing_pivots(df.iloc[:-1].tail(50), n=4)
+    recent_high = max((p.price for p in pivots if p.kind == "high"), default=None)
+    recent_low  = min((p.price for p in pivots if p.kind == "low"),  default=None)
+    # Bullish grab — wicked BELOW prior low but closed back above it
+    if recent_low is not None and lo < recent_low and px > recent_low:
+        stop = lo - 0.2 * atrv
+        targets = smart_targets_long(df, px, stop)
+        conv = base + (0.10 if pat in ("hammer", "engulfing") else 0.0)
+        return Setup(symbol, "Liquidity grab below low (long)", "long",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=min(0.85, conv),
+            reasoning=f"Wicked below prior low ${recent_low:.2f} but closed back inside. Stops were swept. Bar: {pat}.",
+            citation="Smart Money Concepts — liquidity sweep / stop hunt")
+    # Bearish grab — wicked ABOVE prior high but closed back below it
+    if recent_high is not None and hi > recent_high and px < recent_high:
+        stop = hi + 0.2 * atrv
+        targets = smart_targets_short(df, px, stop)
+        conv = base + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
+        return Setup(symbol, "Liquidity grab above high (short)", "short",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=min(0.85, conv - 0.05),
+            reasoning=f"Wicked above prior high ${recent_high:.2f} but closed back inside. Stops were swept. Bar: {pat}.",
+            citation="Smart Money Concepts — liquidity sweep / stop hunt")
+    return None
+
+
+def detect_order_block_retest(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Price returns to an unbroken institutional order block. Bullish OB is
+    the last red candle before a strong rally; bearish OB the last green
+    candle before a strong drop. Retest = high-probability reaction zone."""
+    if df is None or df.empty or len(df) < 30:
+        return None
+    last = df.iloc[-1]
+    px = float(last["close"])
+    lo = float(last["low"])
+    hi = float(last["high"])
+    atrv = float(atr(df, 14).iloc[-1])
+    base = BACKTESTED_CONVICTION.get("Order Block", 0.60)
+    pat = bar_pattern(df)
+    obs = find_order_blocks(df, lookback=80)
+    # Use only UNBROKEN order blocks closest to current price
+    bull_obs = sorted([o for o in obs if o["kind"] == "bull" and not o["broken"]],
+                      key=lambda o: o["top"], reverse=True)
+    bear_obs = sorted([o for o in obs if o["kind"] == "bear" and not o["broken"]],
+                      key=lambda o: o["bot"])
+    for ob in bull_obs:
+        if ob["bot"] <= lo <= ob["top"] and px > ob["mid"]:
+            stop = ob["bot"] - 0.3 * atrv
+            targets = smart_targets_long(df, px, stop)
+            conv = base + (0.10 if pat in ("hammer", "engulfing") else 0.0)
+            return Setup(symbol, f"Bull Order Block retest @ ${ob['mid']:.2f}", "long",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=min(0.88, conv),
+                reasoning=f"Price tagged unbroken bullish order block ${ob['bot']:.2f}–${ob['top']:.2f} and held. Bar: {pat}.",
+                citation="Smart Money Concepts — Order Block retest")
+    for ob in bear_obs:
+        if ob["bot"] <= hi <= ob["top"] and px < ob["mid"]:
+            stop = ob["top"] + 0.3 * atrv
+            targets = smart_targets_short(df, px, stop)
+            conv = base + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
+            return Setup(symbol, f"Bear Order Block retest @ ${ob['mid']:.2f}", "short",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=min(0.88, conv - 0.05),
+                reasoning=f"Price tagged unbroken bearish order block ${ob['bot']:.2f}–${ob['top']:.2f} and rejected. Bar: {pat}.",
+                citation="Smart Money Concepts — Order Block retest")
+    return None
+
+
+def detect_fvg_fill(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Price returns to fill an UNFILLED Fair Value Gap. Bullish FVG = price
+    pulled back into the gap zone (above the gap remains intact = bullish bias
+    continues). Bearish FVG = price rallied into the gap zone (resistance)."""
+    if df is None or df.empty or len(df) < 30:
+        return None
+    last = df.iloc[-1]
+    px = float(last["close"])
+    lo = float(last["low"])
+    hi = float(last["high"])
+    atrv = float(atr(df, 14).iloc[-1])
+    base = BACKTESTED_CONVICTION.get("FVG", 0.56)
+    pat = bar_pattern(df)
+    fvgs = find_fvgs(df, lookback=80)
+    # Bullish FVG: gap zone is SUPPORT — price pulled down INTO it from above
+    bull_fvgs = [f for f in fvgs if f["kind"] == "bull" and not f["filled"]]
+    bear_fvgs = [f for f in fvgs if f["kind"] == "bear" and not f["filled"]]
+    for fvg in bull_fvgs:
+        mid = (fvg["top"] + fvg["bot"]) / 2.0
+        if fvg["bot"] <= lo <= fvg["top"] and px > mid:
+            stop = fvg["bot"] - 0.3 * atrv
+            targets = smart_targets_long(df, px, stop)
+            conv = base + (0.10 if pat in ("hammer", "engulfing") else 0.0)
+            return Setup(symbol, f"Bullish FVG fill @ ${mid:.2f}", "long",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=min(0.85, conv),
+                reasoning=f"Price tagged bullish FVG ${fvg['bot']:.2f}–${fvg['top']:.2f} and held. Bar: {pat}.",
+                citation="Smart Money Concepts — Fair Value Gap fill")
+    for fvg in bear_fvgs:
+        mid = (fvg["top"] + fvg["bot"]) / 2.0
+        if fvg["bot"] <= hi <= fvg["top"] and px < mid:
+            stop = fvg["top"] + 0.3 * atrv
+            targets = smart_targets_short(df, px, stop)
+            conv = base + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
+            return Setup(symbol, f"Bearish FVG fill @ ${mid:.2f}", "short",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=min(0.85, conv - 0.05),
+                reasoning=f"Price tagged bearish FVG ${fvg['bot']:.2f}–${fvg['top']:.2f} and rejected. Bar: {pat}.",
+                citation="Smart Money Concepts — Fair Value Gap fill")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Bonus — Wyckoff Spring/Upthrust, Three Drives, Channel, Volume Profile test
+# ---------------------------------------------------------------------------
+def detect_wyckoff_spring(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Wyckoff Spring (bullish) or Upthrust (bearish). A false break of a
+    well-established support/resistance — price wicks beyond it but reverses
+    sharply within the same bar. Distinguishes a true break from a shakeout."""
+    if df is None or df.empty or len(df) < 30:
+        return None
+    if not volume_confirmed(df, threshold=1.2):
+        return None
+    last = df.iloc[-1]
+    px = float(last["close"])
+    lo_today = float(last["low"])
+    hi_today = float(last["high"])
+    atrv = float(atr(df, 14).iloc[-1])
+    base = BACKTESTED_CONVICTION.get("Wyckoff", 0.60)
+    # Trading range = last 30 bars excluding today
+    rng = df.iloc[-31:-1]
+    rng_hi = float(rng["high"].max())
+    rng_lo = float(rng["low"].min())
+    body = abs(last["close"] - last["open"])
+    full_range = hi_today - lo_today
+    # Spring: wick below range_lo by ≥ 0.3 ATR, but close back inside, body in upper half
+    if lo_today < rng_lo - 0.3 * atrv and px > rng_lo and px > (lo_today + 0.6 * full_range):
+        stop = lo_today - 0.2 * atrv
+        targets = smart_targets_long(df, px, stop)
+        return Setup(symbol, "Wyckoff Spring (long)", "long",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=base + (0.10 if body > 0.3 * atrv else 0.0),
+            reasoning=f"False break below range ${rng_lo:.2f}; reversed sharply within bar. Spring confirmed.",
+            citation="Wyckoff — Spring (false break of support)")
+    # Upthrust: wick above range_hi but close back inside, body in lower half
+    if hi_today > rng_hi + 0.3 * atrv and px < rng_hi and px < (hi_today - 0.6 * full_range):
+        stop = hi_today + 0.2 * atrv
+        targets = smart_targets_short(df, px, stop)
+        return Setup(symbol, "Wyckoff Upthrust (short)", "short",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=base - 0.05 + (0.10 if body > 0.3 * atrv else 0.0),
+            reasoning=f"False break above range ${rng_hi:.2f}; reversed sharply within bar. Upthrust confirmed.",
+            citation="Wyckoff — Upthrust (false break of resistance)")
+    return None
+
+
+def detect_three_drives(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Three-drives reversal — three consecutive swings in the same direction
+    forming an exhaustion. Each drive should extend further than the prior."""
+    if df is None or df.empty or len(df) < 60:
+        return None
+    pivots = swing_pivots(df.tail(80), n=5)
+    if len(pivots) < 6:
+        return None
+    last = df.iloc[-1]
+    px = float(last["close"])
+    atrv = float(atr(df, 14).iloc[-1])
+    base = BACKTESTED_CONVICTION.get("Three Drives", 0.52)
+    # Look for 3 ascending highs (bear reversal) or 3 descending lows (bull reversal)
+    highs = [p for p in pivots if p.kind == "high"]
+    lows  = [p for p in pivots if p.kind == "low"]
+    if len(highs) >= 3:
+        h1, h2, h3 = highs[-3], highs[-2], highs[-1]
+        if h2.price > h1.price and h3.price > h2.price and px < h3.price - 0.3 * atrv:
+            stop = h3.price + 0.3 * atrv
+            targets = smart_targets_short(df, px, stop)
+            return Setup(symbol, "Three Drives Top (short)", "short",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=base,
+                reasoning=f"Three ascending highs ${h1.price:.2f}→${h2.price:.2f}→${h3.price:.2f}; reversal candidate.",
+                citation="Harmonic — Three Drives Top")
+    if len(lows) >= 3:
+        l1, l2, l3 = lows[-3], lows[-2], lows[-1]
+        if l2.price < l1.price and l3.price < l2.price and px > l3.price + 0.3 * atrv:
+            stop = l3.price - 0.3 * atrv
+            targets = smart_targets_long(df, px, stop)
+            return Setup(symbol, "Three Drives Bottom (long)", "long",
+                entry=px, stop_loss=stop, targets=targets,
+                current_price=px, conviction=base,
+                reasoning=f"Three descending lows ${l1.price:.2f}→${l2.price:.2f}→${l3.price:.2f}; reversal candidate.",
+                citation="Harmonic — Three Drives Bottom")
+    return None
+
+
+def detect_channel_break(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Linear regression channel — fits a least-squares line through the last
+    N closes ± 2 standard deviations. Breakout above/below the channel band
+    on volume = trend continuation or reversal trade."""
+    if df is None or df.empty or len(df) < 30:
+        return None
+    if not volume_confirmed(df):
+        return None
+    window = df.tail(40)
+    n = len(window)
+    x = np.arange(n)
+    y = window["close"].values
+    # Least squares regression
+    slope, intercept = np.polyfit(x, y, 1)
+    residuals = y - (slope * x + intercept)
+    std = float(np.std(residuals, ddof=1)) if n > 1 else 0
+    if std == 0:
+        return None
+    last_pos = n - 1
+    midline = slope * last_pos + intercept
+    upper = midline + 2 * std
+    lower = midline - 2 * std
+    last = df.iloc[-1]
+    px = float(last["close"])
+    atrv = float(atr(df, 14).iloc[-1])
+    base = BACKTESTED_CONVICTION.get("Channel", 0.56)
+    pat = bar_pattern(df)
+    if px > upper and slope > 0:
+        stop = midline - 0.3 * atrv
+        targets = smart_targets_long(df, px, stop)
+        conv = base + (0.10 if pat == "engulfing" else 0.0)
+        return Setup(symbol, "Channel Breakout (long)", "long",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=min(0.85, conv),
+            reasoning=f"Break above rising channel upper band ${upper:.2f}. Bar: {pat}.",
+            citation="Linear regression channel — upper breakout")
+    if px < lower and slope < 0:
+        stop = midline + 0.3 * atrv
+        targets = smart_targets_short(df, px, stop)
+        conv = base + (0.10 if pat == "engulfing" else 0.0)
+        return Setup(symbol, "Channel Breakdown (short)", "short",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=min(0.85, conv - 0.05),
+            reasoning=f"Break below falling channel lower band ${lower:.2f}. Bar: {pat}.",
+            citation="Linear regression channel — lower breakdown")
+    return None
+
+
+def detect_volume_profile_test(symbol: str, df: pd.DataFrame) -> Optional[Setup]:
+    """Price tests the Point of Control (POC) or the edges of the Value Area.
+    POC is the most-traded price — a strong magnet/reaction zone. VAH/VAL are
+    the high/low boundaries of the area containing 70% of recent volume."""
+    if df is None or df.empty or len(df) < 30:
+        return None
+    if not volume_confirmed(df):
+        return None
+    vp = compute_volume_profile(df, lookback_bars=60)
+    if not vp or "poc" not in vp:
+        return None
+    last = df.iloc[-1]
+    px = float(last["close"])
+    lo = float(last["low"])
+    hi = float(last["high"])
+    atrv = float(atr(df, 14).iloc[-1])
+    base = BACKTESTED_CONVICTION.get("VolProfile", 0.54)
+    pat = bar_pattern(df)
+    poc, vah, val = vp.get("poc"), vp.get("vah"), vp.get("val")
+    # Long: price tested VAL from above and held
+    if val is not None and lo <= val and px > val and (px - val) <= 0.5 * atrv:
+        stop = val - 0.4 * atrv
+        targets = smart_targets_long(df, px, stop)
+        conv = base + (0.10 if pat in ("hammer", "engulfing") else 0.0)
+        return Setup(symbol, f"Value Area Low test @ ${val:.2f} (long)", "long",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=min(0.82, conv),
+            reasoning=f"Price reached VAL ${val:.2f} (low boundary of 70% value area) and held. POC ${poc:.2f}.",
+            citation="Volume Profile — VAL test")
+    # Short: price tested VAH from below and rejected
+    if vah is not None and hi >= vah and px < vah and (vah - px) <= 0.5 * atrv:
+        stop = vah + 0.4 * atrv
+        targets = smart_targets_short(df, px, stop)
+        conv = base + (0.10 if pat in ("inverted-hammer", "engulfing") else 0.0)
+        return Setup(symbol, f"Value Area High test @ ${vah:.2f} (short)", "short",
+            entry=px, stop_loss=stop, targets=targets,
+            current_price=px, conviction=min(0.82, conv - 0.05),
+            reasoning=f"Price reached VAH ${vah:.2f} (high boundary of 70% value area) and rejected. POC ${poc:.2f}.",
+            citation="Volume Profile — VAH test")
+    return None
+
+
 DETECTORS = [
+    # Wave 0 — original CC patterns
     detect_ema_pullback,
     detect_cc_region_pullback,
     detect_sr_flip,
     detect_volume_spike,
     detect_inside_day,
     detect_rsi_reversal,
+    # Wave 2 — 3rd touch + trendline + ORB
+    detect_third_touch,
+    detect_trendline_break,
+    detect_orb_breakout,
+    # Wave 3 — Smart Money Concepts
+    detect_bos,
+    detect_choch,
+    detect_liquidity_grab,
+    detect_order_block_retest,
+    detect_fvg_fill,
+    # Bonus — Wyckoff, Three Drives, Channel, Volume Profile
+    detect_wyckoff_spring,
+    detect_three_drives,
+    detect_channel_break,
+    detect_volume_profile_test,
 ]
 
 
@@ -3262,12 +4052,24 @@ def run_backtest(tickers: list[str]) -> dict:
     print("=" * 70)
     results = []
     detector_to_name = {
-        detect_ema_pullback:      "EMA Pullback",
-        detect_cc_region_pullback: "CC Region",
-        detect_sr_flip:            "S/R Flip",
-        detect_volume_spike:       "Volume Spike",
-        detect_inside_day:         "Inside Day",
-        detect_rsi_reversal:       "RSI Reversal",
+        detect_ema_pullback:         "EMA Pullback",
+        detect_cc_region_pullback:   "CC Region",
+        detect_sr_flip:              "S/R Flip",
+        detect_volume_spike:         "Volume Spike",
+        detect_inside_day:           "Inside Day",
+        detect_rsi_reversal:         "RSI Reversal",
+        detect_third_touch:          "3rd Touch",
+        detect_trendline_break:      "Trendline Break",
+        detect_orb_breakout:         "ORB",
+        detect_bos:                  "BoS",
+        detect_choch:                "ChoCh",
+        detect_liquidity_grab:       "Liquidity Grab",
+        detect_order_block_retest:   "Order Block",
+        detect_fvg_fill:             "FVG",
+        detect_wyckoff_spring:       "Wyckoff",
+        detect_three_drives:         "Three Drives",
+        detect_channel_break:        "Channel",
+        detect_volume_profile_test:  "VolProfile",
     }
     for fn, name in detector_to_name.items():
         print(f"\n  → backtesting: {name}...")
