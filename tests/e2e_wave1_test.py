@@ -225,8 +225,8 @@ check("Key Levels panel mentions a Fib level (resist)",
       'Fib 0.' in panel and 'resist' in panel)
 check("Key Levels panel shows VWAP",
       'VWAP' in panel)
-check("Key Levels panel shows PP, R1, S1",
-      '>PP<' in panel and 'R1 (pivot)' in panel and 'S1 (pivot)' in panel)
+check("Key Levels panel shows DAILY PP, R1, S1",
+      'DAILY PP' in panel and 'DAILY R1' in panel and 'DAILY S1' in panel)
 
 
 # ---------------------------------------------------------------------------

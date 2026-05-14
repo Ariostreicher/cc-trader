@@ -119,8 +119,8 @@ check("main page still has tools-bar",        'class="tools-bar"' in html_main)
 check("main page still has regime strip",     'class="regime-strip"' in html_main)
 check("main page still has 'Open Chart →' links",
       "/chart?symbol=AAPL" in html_main)
-check("chart page still has 1H/1D/1W/1M TF selector",
-      all(f'data-tf="{t}"' in html_chart for t in ["1H","1D","1W","1M"]))
+check("chart page still has 1h/1D/1W/1M TF selector (Wave 14: 1h lowercase + 13 more)",
+      all(f'data-tf="{t}"' in html_chart for t in ["1h","1D","1W","1M"]))
 check("chart page still has view toggle",     "📊 CC View" in html_chart and "📈 TradingView" in html_chart)
 
 

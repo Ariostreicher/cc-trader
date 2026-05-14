@@ -66,10 +66,10 @@ check("shows resistance levels",         '$210.00' in panel and '$225.00' in pan
 check("shows distance % from current",   '%' in panel and '↑' in panel and '↓' in panel)
 # Support is BELOW current → distance should be negative
 check("supports show '↓ -X%' (below current)",
-      '↓' in panel and 'lbl">Support<' in panel)
+      '↓' in panel and '>Support<' in panel)
 # Resistance is ABOVE current → distance should be positive
 check("resistances show '↑ +X%' (above current)",
-      '↑' in panel and 'lbl">Resistance<' in panel)
+      '↑' in panel and '>Resistance<' in panel)
 
 
 # ---------------------------------------------------------------------------

@@ -183,9 +183,12 @@ check("main page has 'Open Chart →' links to /chart?symbol=X",
 # ---------------------------------------------------------------------------
 print("\n[9] Multi-TF selector preserved inside CC view")
 check("tf-bar still rendered (inside view-cc)",
-      'class="tf-bar"' in html)
-check("All 4 TF buttons still present",
-      all(f'data-tf="{t}"' in html for t in ["1H","1D","1W","1M"]))
+      'class="tf-bar' in html)
+# Wave 14 — original 4-button selector (1H/1D/1W/1M) replaced with 17-button
+# grouped selector (1m..ALL). 1h is now lowercase. We verify the core daily
+# trio + the new lowercase 1h are present.
+check("Core TF buttons present (1h/1D/1W/1M, Wave 14 lowercase 1h)",
+      all(f'data-tf="{t}"' in html for t in ["1h","1D","1W","1M"]))
 
 
 # ---------------------------------------------------------------------------

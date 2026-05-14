@@ -138,8 +138,8 @@ check("loads TradingView library",
       "s3.tradingview.com/tv.js" in html)
 check("has CC View / TradingView toggle buttons",
       "📊 CC View" in html and "📈 TradingView" in html)
-check("has TF selector buttons 1H/1D/1W/1M",
-      all(f'data-tf="{t}"' in html for t in ["1H","1D","1W","1M"]))
+check("has TF selector buttons 1h/1D/1W/1M (Wave 14: 1h lowercase + 13 more)",
+      all(f'data-tf="{t}"' in html for t in ["1h","1D","1W","1M"]))
 check("has annotation buttons (Note / Line / Clear)",
       "✏ Note" in html and "+ Line" in html and "Clear my drawings" in html)
 check("has countdown badge",

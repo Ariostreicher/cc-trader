@@ -3784,77 +3784,121 @@ def _ai_voice_block(ai_text: str) -> str:
 
 
 def _render_key_levels_panel(snap: "Snapshot") -> str:
-    """A consistent 'Key Levels' panel: price + EMAs + S/R + distance%.
-    Used on every setup card AND every snapshot card so the operator always
-    has the full picture next to a chart."""
+    """A consistent 'Key Levels' panel: price + EMAs + S/R + Fib + pivots
+    + Camarilla + VWAP + multi-TF, with EVERY label and value color-coded to
+    match the corresponding line on the chart. Used on every setup card AND
+    every snapshot card."""
     if snap is None:
         return ""
     px = snap.current_price
     def _row(label: str, value: Optional[float], color: str = "#e2e8f0") -> str:
+        """Both label and value share the given color (so the eye finds the
+        right level instantly — they match the line color on the chart)."""
         if value is None:
-            return f'<div><span class="lbl">{label}</span><span class="val">—</span></div>'
+            return f'<div><span class="lbl" style="color:{color}">{label}</span><span class="val">—</span></div>'
         dist_pct = ((value - px) / px * 100.0) if px else 0.0
         arrow = "↑" if dist_pct > 0 else ("↓" if dist_pct < 0 else "•")
         sign = "+" if dist_pct > 0 else ""
         return (
-            f'<div><span class="lbl">{label}</span>'
+            f'<div><span class="lbl" style="color:{color}">{label}</span>'
             f'<span class="val" style="color:{color}">${value:.2f} '
             f'<span class="lvl-dist">({arrow} {sign}{dist_pct:.1f}%)</span></span></div>'
         )
     rows = []
-    rows.append(f'<div><span class="lbl">Current</span><span class="val" style="color:#fbbf24"><b>${px:.2f}</b></span></div>')
-    # Bid / ask / spread — when available
+    rows.append(f'<div><span class="lbl" style="color:#fbbf24"><b>Current</b></span><span class="val" style="color:#fbbf24"><b>${px:.2f}</b></span></div>')
+    # Bid / ask / spread
     if getattr(snap, "bid", None) is not None and getattr(snap, "ask", None) is not None:
         spread_str = f" ({snap.spread_pct:.2f}%)" if snap.spread_pct else ""
         spread_color = "#22c55e" if snap.spread_pct and snap.spread_pct < 0.10 else (
                        "#f59e0b" if snap.spread_pct and snap.spread_pct < 0.50 else "#ef4444")
         rows.append(
-            f'<div><span class="lbl">Bid/Ask</span>'
+            f'<div><span class="lbl" style="color:{spread_color}">Bid/Ask</span>'
             f'<span class="val" style="color:{spread_color}">${snap.bid:.2f} / ${snap.ask:.2f}'
             f'<span class="lvl-dist">{spread_str}</span></span></div>'
         )
     if getattr(snap, "avg_volume", None):
-        # Format volume compactly: 1.2M, 540K, etc.
         v = snap.avg_volume
         if v >= 1_000_000:  v_str = f"{v/1_000_000:.1f}M"
         elif v >= 1_000:    v_str = f"{v/1_000:.0f}K"
         else:               v_str = f"{v:.0f}"
         liq_color = "#22c55e" if v >= 1_000_000 else ("#f59e0b" if v >= 100_000 else "#ef4444")
-        rows.append(f'<div><span class="lbl">Avg vol (20d)</span><span class="val" style="color:{liq_color}">{v_str}</span></div>')
-    rows.append(_row("EMA 55",  snap.ema_55,  "#94a3b8"))
-    rows.append(_row("EMA 100", snap.ema_100, "#94a3b8"))
-    rows.append(_row("EMA 200", snap.ema_200, "#64748b"))
+        rows.append(f'<div><span class="lbl" style="color:{liq_color}">Avg vol (20d)</span><span class="val" style="color:{liq_color}">{v_str}</span></div>')
+    # EMAs — colors match the chart line colors exactly
+    if getattr(snap, "ema_55", None) is not None or hasattr(snap, "ema_55"):
+        # EMA 8 / 21 if exposed elsewhere (we don't have them on the Snapshot
+        # but they show up in the chart legend — the Key Levels panel always
+        # shows 55/100/200 which are the CC-canonical ones)
+        rows.append(_row("EMA 55",  snap.ema_55,  "#94a3b8"))
+        rows.append(_row("EMA 100", snap.ema_100, "#cbd5e1"))
+        rows.append(_row("EMA 200", snap.ema_200, "#64748b"))
     if snap.rsi_14 is not None:
         rsi_color = "#ef4444" if snap.rsi_14 > 70 else ("#22c55e" if snap.rsi_14 < 30 else "#94a3b8")
-        rows.append(f'<div><span class="lbl">RSI 14</span><span class="val" style="color:{rsi_color}">{snap.rsi_14:.1f}</span></div>')
+        rows.append(f'<div><span class="lbl" style="color:{rsi_color}">RSI 14</span><span class="val" style="color:{rsi_color}">{snap.rsi_14:.1f}</span></div>')
+    # Support (green — matches chart) / Resistance (red)
     for sup in (snap.support_levels or [])[-3:]:
         rows.append(_row("Support", sup, "#22c55e"))
     for res in (snap.resistance_levels or [])[-3:]:
         rows.append(_row("Resistance", res, "#ef4444"))
-    # Wave 1: Fibonacci ladder — show the nearest above and nearest below the
-    # current price (the active fib zone — where the operator is decision-making).
+    # Fibonacci ladder (yellow for retracements, orange for extensions)
     fib_data = getattr(snap, "fib", None)
     if fib_data and fib_data.get("retracements"):
-        all_fibs = list(fib_data["retracements"].items()) + list((fib_data.get("extensions") or {}).items())
-        below = [(pct, float(v)) for pct, v in all_fibs if float(v) < px]
-        above = [(pct, float(v)) for pct, v in all_fibs if float(v) > px]
+        retr = fib_data["retracements"]
+        exts = fib_data.get("extensions") or {}
+        all_fibs = [(pct, float(v), "retr") for pct, v in retr.items()] \
+                 + [(pct, float(v), "ext")  for pct, v in exts.items()]
+        below = [t for t in all_fibs if t[1] < px]
+        above = [t for t in all_fibs if t[1] > px]
         below.sort(key=lambda x: x[1], reverse=True)
         above.sort(key=lambda x: x[1])
-        # Show up to 2 closest fibs below + 2 closest fibs above
-        for pct, v in below[:2]:
-            rows.append(_row(f"Fib {pct} (support)", v, "#fbbf24"))
-        for pct, v in above[:2]:
-            rows.append(_row(f"Fib {pct} (resist)", v, "#fbbf24"))
-    # VWAP anchored
+        for pct, v, kind in below[:2]:
+            color = "#f97316" if kind == "ext" else "#fbbf24"
+            rows.append(_row(f"Fib {pct} (support)", v, color))
+        for pct, v, kind in above[:2]:
+            color = "#f97316" if kind == "ext" else "#fbbf24"
+            rows.append(_row(f"Fib {pct} (resist)", v, color))
+    # Anchored VWAP (blue — matches chart)
     vwap = getattr(snap, "vwap_anchored", None)
     if vwap is not None:
         rows.append(_row("VWAP (anchored)", float(vwap), "#3b82f6"))
-    # Pivot Points — show PP, R1, S1 (the most-respected three)
+    # DAILY Pivot Points (yellow tones)
     pivots = getattr(snap, "pivots", None)
     if pivots:
-        rows.append(_row("PP", pivots.get("pp"), "#e2e8f0"))
-        rows.append(_row("R1 (pivot)", pivots.get("r1"), "#ef4444"))
-        rows.append(_row("S1 (pivot)", pivots.get("s1"), "#22c55e"))
+        rows.append(_row("DAILY PP",     pivots.get("pp"), "#fde047"))
+        rows.append(_row("DAILY R1",     pivots.get("r1"), "#fde047"))
+        rows.append(_row("DAILY S1",     pivots.get("s1"), "#fde047"))
+    # WEEKLY Pivot Points (pink)
+    piv_w = getattr(snap, "pivots_weekly", None)
+    if piv_w:
+        rows.append(_row("WEEKLY PP",    piv_w.get("pp"), "#ec4899"))
+        rows.append(_row("WEEKLY R1",    piv_w.get("r1"), "#ec4899"))
+        rows.append(_row("WEEKLY S1",    piv_w.get("s1"), "#ec4899"))
+    # MONTHLY Pivot Points (purple)
+    piv_m = getattr(snap, "pivots_monthly", None)
+    if piv_m:
+        rows.append(_row("MONTHLY PP",   piv_m.get("pp"), "#a855f7"))
+        rows.append(_row("MONTHLY R1",   piv_m.get("r1"), "#a855f7"))
+        rows.append(_row("MONTHLY S1",   piv_m.get("s1"), "#a855f7"))
+    # Volume Profile — WEEKLY (orange) / MONTHLY (red)
+    vp_w = getattr(snap, "vp_weekly", None)
+    if vp_w and "poc" in vp_w:
+        rows.append(_row("WEEKLY POC",   vp_w.get("poc"), "#f97316"))
+        rows.append(_row("WEEKLY VAH",   vp_w.get("vah"), "#f97316"))
+        rows.append(_row("WEEKLY VAL",   vp_w.get("val"), "#f97316"))
+    vp_m = getattr(snap, "vp_monthly", None)
+    if vp_m and "poc" in vp_m:
+        rows.append(_row("MONTHLY POC",  vp_m.get("poc"), "#dc2626"))
+        rows.append(_row("MONTHLY VAH",  vp_m.get("vah"), "#dc2626"))
+        rows.append(_row("MONTHLY VAL",  vp_m.get("val"), "#dc2626"))
+    # Naked POCs (cyan)
+    for n in (getattr(snap, "naked_pocs", None) or [])[:3]:
+        rows.append(_row("nPOC", float(n["poc"]), "#06b6d4"))
+    # Camarilla pivots (teal)
+    cam = getattr(snap, "camarilla", None)
+    if cam:
+        for key, label in [("h4","CAM H4"),("h3","CAM H3"),("h2","CAM H2"),("h1","CAM H1"),
+                           ("l1","CAM L1"),("l2","CAM L2"),("l3","CAM L3"),("l4","CAM L4")]:
+            if key in cam:
+                rows.append(_row(label, float(cam[key]), "#14b8a6"))
     return (
         '<div class="key-levels"><div class="kl-head">📐 Key Levels (with distance from current)</div>'
         f'<div class="setup-grid">{"".join(rows)}</div></div>'
@@ -6132,6 +6176,192 @@ def fetch_hourly_bars(sym_u: str) -> Optional[pd.DataFrame]:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Wave 14 — full TradingView-style TF selector helpers.
+# yfinance interval/period constraints (must be obeyed):
+#   1m       → period ≤ 7d
+#   2m,5m,15m,30m → period ≤ 60d
+#   60m/90m  → period ≤ 730d (we use 60d for safety/speed)
+#   1d/5d/1wk/1mo/3mo → period="max" works
+# Derived intervals (3m, 45m, 2h, 3h, 4h, 3M, 6M, 12M, ALL) are produced by
+# resampling a finer raw interval — saves an extra network round-trip and keeps
+# bars aligned with the user's local TZ.
+# ---------------------------------------------------------------------------
+def fetch_intraday_bars(sym_u: str, interval: str, period: str) -> Optional[pd.DataFrame]:
+    """Generic intraday fetch — handles 1m / 5m / 15m / 30m / 60m / etc.
+    Returns OHLCV dataframe or None on failure / empty result.
+    """
+    try:
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            d = yf.download(sym_u, period=period, interval=interval,
+                            auto_adjust=True, progress=False, threads=False)
+        if d is None or d.empty:
+            return None
+        if isinstance(d.columns, pd.MultiIndex):
+            d.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in d.columns]
+        else:
+            d.columns = [c.lower() for c in d.columns]
+        return d[["open","high","low","close","volume"]].dropna()
+    except Exception:
+        return None
+
+
+def resample_bars(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """Resample an OHLCV dataframe to a coarser pandas frequency rule (e.g.
+    '3min', '45min', '2h', '4h', 'QE', '2QE', 'YE', 'ME').
+    Drops empty bars; returns empty df if input is None/empty."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    try:
+        agg = df.resample(rule).agg({
+            "open": "first", "high": "max", "low": "min",
+            "close": "last", "volume": "sum",
+        }).dropna()
+        return agg
+    except Exception:
+        return pd.DataFrame()
+
+
+def fetch_max_history(sym_u: str) -> Optional[pd.DataFrame]:
+    """Fetch full-history daily bars (period='max') for ALL-time analysis.
+    May return thousands of rows for older tickers (e.g. AAPL since 1980)."""
+    try:
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            d = yf.download(sym_u, period="max", interval="1d",
+                            auto_adjust=True, progress=False, threads=False)
+        if d is None or d.empty:
+            return None
+        if isinstance(d.columns, pd.MultiIndex):
+            d.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in d.columns]
+        else:
+            d.columns = [c.lower() for c in d.columns]
+        return d[["open","high","low","close","volume"]].dropna()
+    except Exception:
+        return None
+
+
+# Map of TF → (raw_interval, raw_period, optional resample rule) for the
+# /chart-tf lazy-load endpoint. None resample = use raw as-is.
+TF_FETCH_MAP: dict[str, tuple[str, str, Optional[str]]] = {
+    "1m":  ("1m",  "7d",  None),
+    "3m":  ("1m",  "7d",  "3min"),
+    "5m":  ("5m",  "60d", None),
+    "15m": ("15m", "60d", None),
+    "30m": ("30m", "60d", None),
+    "45m": ("15m", "60d", "45min"),
+    "1h":  ("60m", "60d", None),
+    "2h":  ("60m", "60d", "2h"),
+    "3h":  ("60m", "60d", "3h"),
+    "4h":  ("60m", "60d", "4h"),
+}
+
+# Daily-derived TFs — resampled from the cached daily_df (no extra fetch).
+# Pandas resample rule + tail count.
+TF_DAILY_DERIVED: dict[str, tuple[str, int]] = {
+    "1D":  ("D",  1000),    # ~4 years
+    "1W":  ("W",  520),     # ~10 years
+    "1M":  ("ME", 240),     # ~20 years
+    "3M":  ("QE", 80),      # ~20 years of quarters
+    "6M":  ("2QE", 40),     # ~20 years of semesters
+    "12M": ("YE", 30),      # ~30 years of annual bars
+}
+
+
+def fetch_tf_bars(sym_u: str, tf: str,
+                  daily_df: Optional[pd.DataFrame] = None) -> Optional[pd.DataFrame]:
+    """Return the OHLCV dataframe for ONE timeframe — the workhorse behind
+    the /chart-tf lazy-load endpoint.
+
+    Strategy:
+      • Intraday (1m..4h)  → fetch from yfinance per TF_FETCH_MAP, optionally
+                              resample to derived TF.
+      • Daily-derived      → resample from caller-provided daily_df (cheap).
+      • ALL                → fetch period='max' daily, resample to monthly
+                              (Aaron's preference: 'el all que sea con bar
+                              mensuales').
+    """
+    if tf in TF_FETCH_MAP:
+        raw_int, raw_period, rule = TF_FETCH_MAP[tf]
+        # 60m has its own historical helper (kept for backwards compat).
+        if raw_int == "60m" and rule is None:
+            raw = fetch_hourly_bars(sym_u)
+        else:
+            raw = fetch_intraday_bars(sym_u, raw_int, raw_period)
+        if raw is None or raw.empty:
+            return None
+        if rule:
+            return resample_bars(raw, rule)
+        return raw
+    if tf in TF_DAILY_DERIVED:
+        if daily_df is None or daily_df.empty:
+            return None
+        rule, tail = TF_DAILY_DERIVED[tf]
+        if rule == "D":
+            return daily_df.tail(tail).copy()
+        agg = resample_bars(daily_df, rule)
+        return agg.tail(tail) if not agg.empty else None
+    if tf == "ALL":
+        # Monthly bars from inception — Aaron's spec.
+        full = fetch_max_history(sym_u)
+        if full is None or full.empty:
+            return None
+        monthly = resample_bars(full, "ME")
+        # Cap to keep payload small (max 600 monthly bars = 50 years)
+        return monthly.tail(600) if not monthly.empty else None
+    return None
+
+
+# Whether a TF should be serialized with intraday (unix-seconds) vs daily-string
+# time format — required by Lightweight Charts to render correctly.
+TF_IS_INTRADAY: dict[str, bool] = {
+    "1m": True, "3m": True, "5m": True, "15m": True, "30m": True, "45m": True,
+    "1h": True, "2h": True, "3h": True, "4h": True,
+    "1D": False, "1W": False, "1M": False,
+    "3M": False, "6M": False, "12M": False, "ALL": False,
+}
+
+# Master list of valid TFs (used by /chart-tf endpoint for validation).
+VALID_TFS = list(TF_FETCH_MAP.keys()) + list(TF_DAILY_DERIVED.keys()) + ["ALL"]
+
+
+def fetch_daily_history(sym_u: str, period: str = "5y") -> Optional[pd.DataFrame]:
+    """Lightweight daily-bar fetch — used by /chart-tf when a daily-derived TF
+    (1D / 1W / 1M / 3M / 6M / 12M) is requested. Avoids re-running the full
+    scan_one detectors path."""
+    try:
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            d = yf.download(sym_u, period=period, interval="1d",
+                            auto_adjust=True, progress=False, threads=False)
+        if d is None or d.empty:
+            return None
+        if isinstance(d.columns, pd.MultiIndex):
+            d.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in d.columns]
+        else:
+            d.columns = [c.lower() for c in d.columns]
+        return d[["open","high","low","close","volume"]].dropna()
+    except Exception:
+        return None
+
+
+def serialize_tf_for_chart(sym_u: str, tf: str) -> dict:
+    """Top-level dispatch: fetch ONE timeframe's bars and serialize to the
+    LWC-ready dict (candles + volume + EMAs). Used by the /chart-tf lazy-load
+    HTTP endpoint."""
+    daily_df = None
+    if tf in TF_DAILY_DERIVED:
+        # Daily-derived TFs need the underlying daily df.
+        daily_df = fetch_daily_history(sym_u, period="5y")
+    bars = fetch_tf_bars(sym_u, tf, daily_df=daily_df)
+    daily_format = not TF_IS_INTRADAY.get(tf, False)
+    return serialize_chart_tf(bars, daily_format=daily_format)
+
+
 def build_multi_tf_chart_data(sym_u: str, daily_df: pd.DataFrame,
                                fetch_hourly: bool = True) -> dict:
     """Build the {default_tf, timeframes:{1H,1D,1W,1M}} payload for LWC."""
@@ -6864,10 +7094,31 @@ def render_single_chart_html(
   .tv-widget-host iframe {{ height:680px !important; width:100% !important; border:0 !important; border-radius:6px; }}
   .lwc-wrap {{ background:#0a0f1c; border-radius:8px; padding:8px; position:relative; }}
   .tf-bar {{ display:flex; gap:4px; margin-bottom:6px; padding:4px; background:#0f172a; border-radius:6px; }}
-  .tf-btn {{ padding:5px 12px; border:1px solid #1e293b; background:#0a0f1c; color:#94a3b8; border-radius:4px; font-size:11px; font-family:ui-monospace,monospace; cursor:pointer; font-weight:600; }}
+  .tf-bar-grouped {{ flex-wrap:wrap; align-items:center; gap:3px; }}
+  .tf-group-label {{ font-size:9px; color:#475569; text-transform:uppercase; letter-spacing:0.6px; padding:0 4px; font-weight:700; }}
+  .tf-group-sep {{ width:1px; height:18px; background:#1e293b; margin:0 4px; }}
+  .tf-btn {{ padding:5px 10px; border:1px solid #1e293b; background:#0a0f1c; color:#94a3b8; border-radius:4px; font-size:11px; font-family:ui-monospace,monospace; cursor:pointer; font-weight:600; }}
   .tf-btn:hover:not(:disabled) {{ background:#1e293b; color:#e2e8f0; }}
   .tf-btn.active {{ background:#22c55e; color:#000; border-color:#22c55e; }}
   .tf-btn.tf-unavailable {{ opacity:0.35; cursor:not-allowed; }}
+  .tf-btn.tf-loading {{ background:#1e1b4b; color:#a78bfa; border-color:#a78bfa; }}
+  .tf-btn-all {{ background:#1e1b4b; border-color:#312e81; color:#a78bfa; }}
+  .tf-btn-all:hover:not(:disabled) {{ background:#312e81; color:#fff; }}
+  .tf-loading {{ position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:rgba(15,23,42,0.95); border:1px solid #fbbf24; border-radius:8px; padding:14px 20px; display:flex; align-items:center; gap:10px; z-index:9999; font-size:12px; color:#fbbf24; box-shadow:0 8px 30px rgba(0,0,0,0.6); }}
+  .tf-spinner {{ width:14px; height:14px; border:2px solid #1e293b; border-top-color:#fbbf24; border-radius:50%; animation:cc-spin 0.8s linear infinite; }}
+  @keyframes cc-spin {{ to {{ transform:rotate(360deg); }} }}
+  /* Wave 14 — All-Time Analysis opt-in CTA + result panel */
+  .all-time-cta {{ display:flex; align-items:center; gap:8px; padding:10px 14px; margin-top:10px; background:linear-gradient(135deg,#1e1b4b 0%,#3b0764 100%); border:1px solid #6d28d9; border-radius:8px; flex-wrap:wrap; }}
+  .all-time-btn {{ padding:8px 16px; background:#7c3aed; border:0; color:#fff; border-radius:6px; cursor:pointer; font-weight:600; font-size:12px; font-family:ui-monospace,monospace; }}
+  .all-time-btn:hover:not(:disabled) {{ background:#6d28d9; }}
+  .all-time-btn:disabled {{ opacity:0.55; cursor:wait; }}
+  .all-time-warn {{ font-size:10px; color:#c4b5fd; flex:1; min-width:160px; }}
+  .all-time-result {{ margin-top:10px; padding:14px; background:#0f172a; border-left:4px solid #a78bfa; border-radius:6px; font-size:12px; }}
+  .all-time-result h4 {{ margin:0 0 8px 0; color:#a78bfa; font-size:13px; }}
+  .all-time-result .at-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:4px 16px; margin-bottom:8px; }}
+  .all-time-result .at-row {{ display:flex; justify-content:space-between; padding:2px 0; font-family:ui-monospace,monospace; }}
+  .all-time-result .at-setups {{ margin-top:8px; padding-top:8px; border-top:1px solid #1e293b; }}
+  .all-time-result .at-setup-row {{ padding:6px 8px; margin-top:4px; background:#0a0f1c; border-left:3px solid #22c55e; border-radius:4px; font-size:11px; }}
   .lwc-chart {{ height:680px; width:100%; }}
   .lwc-fallback {{ height:680px; display:flex; align-items:center; justify-content:center; color:#64748b; font-size:13px; }}
   .lwc-legend {{ position:absolute; left:14px; top:60px; background:rgba(15,23,42,0.78); border:1px solid #1e293b; border-radius:6px; padding:6px 10px; font-size:11px; font-family:ui-monospace,monospace; color:#94a3b8; pointer-events:none; line-height:1.6; }}
@@ -6977,14 +7228,38 @@ def render_single_chart_html(
         </div>
         <div class="view-cc" data-view-id="chart_solo">
           <div class="lwc-wrap">
-            <div class="tf-bar">
-              <button class="tf-btn" data-tf="1H">1H</button>
+            <div class="tf-bar tf-bar-grouped">
+              <span class="tf-group-label">Min</span>
+              <button class="tf-btn" data-tf="1m">1m</button>
+              <button class="tf-btn" data-tf="3m">3m</button>
+              <button class="tf-btn" data-tf="5m">5m</button>
+              <button class="tf-btn" data-tf="15m">15m</button>
+              <button class="tf-btn" data-tf="30m">30m</button>
+              <button class="tf-btn" data-tf="45m">45m</button>
+              <span class="tf-group-sep"></span>
+              <span class="tf-group-label">Hour</span>
+              <button class="tf-btn" data-tf="1h">1h</button>
+              <button class="tf-btn" data-tf="2h">2h</button>
+              <button class="tf-btn" data-tf="3h">3h</button>
+              <button class="tf-btn" data-tf="4h">4h</button>
+              <span class="tf-group-sep"></span>
+              <span class="tf-group-label">Day+</span>
               <button class="tf-btn" data-tf="1D">1D</button>
               <button class="tf-btn" data-tf="1W">1W</button>
               <button class="tf-btn" data-tf="1M">1M</button>
+              <span class="tf-group-sep"></span>
+              <span class="tf-group-label">Range</span>
+              <button class="tf-btn" data-tf="3M">3M</button>
+              <button class="tf-btn" data-tf="6M">6M</button>
+              <button class="tf-btn" data-tf="12M">12M</button>
+              <button class="tf-btn tf-btn-all" data-tf="ALL">ALL</button>
             </div>
             <div class="lwc-chart" id="lwc_chart_solo" data-symbol="{symbol}" data-lines='{price_lines_json}'></div>
             <div class="lwc-legend" id="lg_chart_solo"></div>
+            <div class="tf-loading" id="tf_loading_chart_solo" style="display:none">
+              <div class="tf-spinner"></div>
+              <span class="tf-loading-text">Loading…</span>
+            </div>
           </div>
         </div>
         <div class="view-tv" data-view-id="chart_solo" data-tv-symbol="{tv_sym}" style="display:none">
@@ -6998,6 +7273,12 @@ def render_single_chart_html(
         <button onclick="openManualSetupSolo('{symbol}', {px:.2f})">✎ Add manual setup</button>
         <a href="https://www.tradingview.com/chart/?symbol={tv_sym}" target="_blank">🔗 Open in TradingView.com</a>
       </div>
+
+      <div class="all-time-cta">
+        <button class="all-time-btn" id="all-time-btn" onclick="runAllTimeAnalysis('{symbol}')">🔬 Run All-Time Analysis (~15 min)</button>
+        <span class="all-time-warn">⏱ Analyzes the FULL price history (since inception). Heavy — only run when you really want it. NOT automatic.</span>
+      </div>
+      <div id="all-time-result"></div>
     </div>
 
     <div class="side-panel">
@@ -7295,7 +7576,11 @@ def render_single_chart_html(
         document.body.appendChild(tooltipEl);
       }}
       chart.subscribeCrosshairMove(function(param) {{
-        if (!param.point || !param.time || !param.seriesPrices) {{
+        // Wave 13 fix: don't require seriesPrices/seriesData — LWC v4 renamed
+        // this to seriesData (a Map) and it may be absent if the cursor is
+        // not directly over data points. We still want the tooltip to show
+        // when hovering near any horizontal price-line.
+        if (!param.point) {{
           tooltipEl.style.display = 'none';
           return;
         }}
@@ -7308,16 +7593,19 @@ def render_single_chart_html(
         // Tolerance: 0.4% of the price
         var tol = Math.abs(px) * 0.004;
         var matches = lines.filter(function(l) {{ return Math.abs(l.price - px) <= tol; }});
-        // Also include EMA values near crosshair via the seriesPrices map
-        var seriesAt = param.seriesPrices;
+        // Also include EMA values near crosshair via param.seriesData (LWC v4
+        // Map) — falls back gracefully if not present.
+        var seriesAt = param.seriesData || param.seriesPrices;
         if (seriesAt && typeof seriesAt.forEach === 'function') {{
           seriesAt.forEach(function(val, series) {{
             try {{
-              if (typeof val === 'number' && Math.abs(val - px) <= tol) {{
-                // EMA series — find its title from emaSeries map
+              // val can be a number OR a candle/line object {{value, time, ...}}
+              var v = (typeof val === 'number') ? val
+                    : (val && typeof val.value === 'number' ? val.value : null);
+              if (v !== null && Math.abs(v - px) <= tol) {{
                 Object.keys(emaSeries).forEach(function(k) {{
                   if (emaSeries[k] === series) {{
-                    matches.push({{title: k.replace('_', ' ').toUpperCase() + ' $' + val.toFixed(2), color: '#94a3b8'}});
+                    matches.push({{title: k.replace('_', ' ').toUpperCase() + ' $' + v.toFixed(2), color: '#94a3b8', price: v}});
                   }}
                 }});
               }}
@@ -7353,14 +7641,14 @@ def render_single_chart_html(
         emaSeries: emaSeries, currentTf: defaultTf, rawData: rawData,
       }};
 
-      // Wire TF buttons
+      // Wave 14 — TF buttons cover ALL 17 intervals. The page is BAKED with
+      // 1D / 1W / 1M only (cheap from daily_df). Every other TF (1m, 3m, 5m,
+      // 15m, 30m, 45m, 1h, 2h, 3h, 4h, 3M, 6M, 12M, ALL) is LAZY-FETCHED from
+      // /chart-tf on first click, then cached client-side in window.cc_tf_cache
+      // so repeat clicks are instant.
+      window.cc_tf_cache = window.cc_tf_cache || {{}};
       document.querySelectorAll('.tf-btn').forEach(function(btn) {{
         var tf = btn.getAttribute('data-tf');
-        if (avail.indexOf(tf) < 0) {{
-          btn.classList.add('tf-unavailable');
-          btn.title = tf + ' not available';
-          btn.disabled = true;
-        }}
         if (tf === defaultTf) btn.classList.add('active');
         btn.addEventListener('click', function() {{
           if (btn.disabled) return;
@@ -7386,20 +7674,130 @@ def render_single_chart_html(
       applyAnnotations(sym, 'chart_solo');
     }}
 
-    function switchSoloTf(tf, btn) {{
-      var h = window.cc_chart_handles['lwc_chart_solo'];
-      if (!h) return;
-      var tfData = _getTfData(h.rawData, tf);
-      if (!tfData || !tfData.candles) return;
+    // Wave 14 — Intraday TF set (must render with timeVisible=true).
+    var INTRADAY_TFS = ['1m','3m','5m','15m','30m','45m','1h','2h','3h','4h'];
+
+    function _applyTfData(h, tf, tfData) {{
+      if (!tfData || !tfData.candles || !tfData.candles.length) return false;
       h.candleSeries.setData(tfData.candles);
       if (h.volSeries && tfData.volume) h.volSeries.setData(tfData.volume);
       ['ema_8','ema_21','ema_55','ema_100','ema_200'].forEach(function(k) {{
         if (h.emaSeries[k]) h.emaSeries[k].setData(tfData[k] || []);
       }});
-      h.chart.applyOptions({{ timeScale: {{ timeVisible: (tf === '1H') }} }});
+      h.chart.applyOptions({{ timeScale: {{ timeVisible: INTRADAY_TFS.indexOf(tf) >= 0 }} }});
       h.chart.timeScale().fitContent();
+      h.currentTf = tf;
+      return true;
+    }}
+
+    function switchSoloTf(tf, btn) {{
+      var h = window.cc_chart_handles['lwc_chart_solo'];
+      if (!h) return;
+      var sym = h.candleSeries ? document.getElementById('lwc_chart_solo').getAttribute('data-symbol') : '{symbol}';
+
+      // Mark active button (visual feedback before fetch resolves).
       document.querySelectorAll('.tf-btn').forEach(function(b) {{ b.classList.remove('active'); }});
       if (btn) btn.classList.add('active');
+
+      // 1) Bundle-baked TFs (1D / 1W / 1M) — already in window.cc_charts_data.
+      var bakedData = _getTfData(h.rawData, tf);
+      if (bakedData && bakedData.candles && bakedData.candles.length) {{
+        _applyTfData(h, tf, bakedData);
+        return;
+      }}
+
+      // 2) Client-side cache (already fetched this session)
+      if (window.cc_tf_cache[tf]) {{
+        _applyTfData(h, tf, window.cc_tf_cache[tf]);
+        return;
+      }}
+
+      // 3) Lazy-fetch from /chart-tf
+      var loader = document.getElementById('tf_loading_chart_solo');
+      if (loader) {{
+        loader.style.display = 'flex';
+        loader.querySelector('.tf-loading-text').textContent =
+          'Loading ' + tf + (tf === 'ALL' ? ' (monthly bars, full history)…' : ' …');
+      }}
+      if (btn) btn.classList.add('tf-loading');
+
+      var url = '/chart-tf?symbol=' + encodeURIComponent(sym) + '&tf=' + encodeURIComponent(tf);
+      fetch(url).then(function(r) {{ return r.json(); }}).then(function(j) {{
+        if (j && j.candles && j.candles.length) {{
+          window.cc_tf_cache[tf] = j;
+          _applyTfData(h, tf, j);
+        }} else {{
+          showToast('⚠ No data for ' + tf + ' — try another TF');
+          if (btn) btn.classList.remove('active');
+        }}
+      }}).catch(function(err) {{
+        showToast('⚠ ' + tf + ' fetch failed');
+        if (btn) btn.classList.remove('active');
+      }}).finally(function() {{
+        if (loader) loader.style.display = 'none';
+        if (btn) btn.classList.remove('tf-loading');
+      }});
+    }}
+
+    // Wave 14 — opt-in All-Time Analysis (~15 min). Triggered ONLY by user
+    // clicking the button + accepting the confirm prompt.
+    function runAllTimeAnalysis(sym) {{
+      var ok = confirm(
+        '🔬 All-Time Analysis for ' + sym + '\\n\\n' +
+        'This will fetch the FULL price history (since the stock first listed) ' +
+        'and re-run all 38 detectors + compute Fibonacci & support/resistance ' +
+        'over the entire dataset.\\n\\n' +
+        'Estimated time: ~15 minutes. Continue?'
+      );
+      if (!ok) return;
+      var btn = document.getElementById('all-time-btn');
+      var out = document.getElementById('all-time-result');
+      if (btn) {{ btn.disabled = true; btn.textContent = '⏳ Analyzing… (~15 min)'; }}
+      if (out) out.innerHTML = '<div class="all-time-result"><h4>⏳ Working on ' + sym + '…</h4><div>This page is safe to leave open. The browser will not show the result until the server finishes.</div></div>';
+      fetch('/chart-allhist?symbol=' + encodeURIComponent(sym)).then(function(r) {{ return r.json(); }}).then(function(j) {{
+        if (j.error) {{
+          out.innerHTML = '<div class="all-time-result"><h4>✗ Error</h4><div>' + j.error + '</div></div>';
+          return;
+        }}
+        var ath = j.all_time_high || {{}}; var atl = j.all_time_low || {{}};
+        var fib = j.fib_full || {{}};
+        var fibRows = '';
+        if (fib.retracements) {{
+          fibRows = Object.keys(fib.retracements).sort().map(function(p) {{
+            return '<div class="at-row"><span>Fib ' + p + '</span><span>$' + fib.retracements[p].toFixed(2) + '</span></div>';
+          }}).join('');
+        }}
+        var setupRows = (j.setups || []).map(function(s) {{
+          return '<div class="at-setup-row"><b>' + s.name + '</b> · ' + s.direction.toUpperCase()
+               + ' · entry $' + s.entry.toFixed(2) + ' · stop $' + s.stop.toFixed(2)
+               + ' · conv ' + Math.round(s.conviction * 100) + '%</div>';
+        }}).join('');
+        var supports = (j.sr_full && j.sr_full.support || []).slice(-5)
+          .map(function(v) {{ return '$' + v.toFixed(2); }}).join(', ') || '—';
+        var resistances = (j.sr_full && j.sr_full.resistance || []).slice(0,5)
+          .map(function(v) {{ return '$' + v.toFixed(2); }}).join(', ') || '—';
+        out.innerHTML =
+            '<div class="all-time-result">'
+          + '<h4>🔬 All-Time Analysis · ' + sym + ' · ' + j.bars_count + ' bars (' + j.first_date + ' → ' + j.last_date + ') · ' + j.duration_s + 's</h4>'
+          + '<div class="at-grid">'
+          +   '<div class="at-row"><span>All-Time High</span><span>$' + (ath.price ? ath.price.toFixed(2) : '—') + ' on ' + (ath.date || '—') + '</span></div>'
+          +   '<div class="at-row"><span>All-Time Low</span><span>$' + (atl.price ? atl.price.toFixed(2) : '—') + ' on ' + (atl.date || '—') + '</span></div>'
+          +   '<div class="at-row"><span>Fib direction</span><span>' + (fib.direction || '—') + '</span></div>'
+          +   '<div class="at-row"><span>Fib high / low</span><span>$' + (fib.high ? fib.high.toFixed(2) : '—') + ' / $' + (fib.low ? fib.low.toFixed(2) : '—') + '</span></div>'
+          + '</div>'
+          + (fibRows ? ('<h4 style="margin-top:8px">📐 Full-History Fibonacci ladder</h4>' + fibRows) : '')
+          + '<h4 style="margin-top:8px">🧭 Full-History S/R clusters</h4>'
+          + '<div class="at-row"><span>Support (below px)</span><span>' + supports + '</span></div>'
+          + '<div class="at-row"><span>Resistance (above px)</span><span>' + resistances + '</span></div>'
+          + (setupRows
+              ? ('<div class="at-setups"><h4>🎯 Setups firing on full history (' + j.setups.length + ')</h4>' + setupRows + '</div>')
+              : '<div class="at-setups"><h4>No setups fire on the full-history series.</h4></div>')
+          + '</div>';
+      }}).catch(function(err) {{
+        out.innerHTML = '<div class="all-time-result"><h4>✗ Fetch failed</h4><div>' + err + '</div></div>';
+      }}).finally(function() {{
+        if (btn) {{ btn.disabled = false; btn.textContent = '🔬 Run All-Time Analysis (~15 min)'; }}
+      }});
     }}
 
     function updateCountdown() {{
@@ -7435,6 +7833,89 @@ def render_single_chart_html(
 </body></html>"""
 
 
+def build_all_time_analysis(symbol_raw: str) -> dict:
+    """Wave 14 — Run the full detector suite over the ENTIRE price history of
+    a ticker (period='max') and compute Fib/SR using the full lookback. This
+    is the opt-in /chart-allhist endpoint behind the '🔬 Run All-Time Analysis
+    (~15 min)' button. NOT triggered automatically.
+
+    Returns a JSON-serializable dict with:
+      - bars_count:        how many daily bars were analyzed
+      - first_date / last_date
+      - setups:            list of fired Setup dicts (any detector that fired
+                           on the full-history series)
+      - fib_full:          Fibonacci ladder anchored to all-time high/low
+      - sr_full:           support/resistance from the full series
+      - all_time_high / all_time_low (with dates)
+      - duration_s:        analysis wall time
+    """
+    import time
+    started = time.time()
+    sym = resolve_ticker(symbol_raw)
+    if not sym:
+        return {"error": "invalid_symbol", "input": symbol_raw}
+    full_df = fetch_max_history(sym)
+    if full_df is None or full_df.empty:
+        return {"error": "no_data", "symbol": sym}
+
+    # Detectors — fire over the FULL series.
+    setups_fired: list[dict] = []
+    for fn in DETECTORS:
+        try:
+            s = fn(sym, full_df)
+            if s is not None:
+                setups_fired.append({
+                    "name": s.name, "direction": s.direction,
+                    "entry": float(s.entry), "stop": float(s.stop_loss),
+                    "targets": [float(t) for t in (s.targets or [])],
+                    "conviction": float(s.conviction),
+                    "reasoning": s.reasoning,
+                    "citation": s.citation,
+                })
+        except Exception:
+            continue
+
+    # Full-history Fib (lookback = entire df).
+    try:
+        fib_full = compute_fib_levels(full_df, lookback_bars=len(full_df))
+    except Exception:
+        fib_full = {}
+
+    # Full-history S/R.
+    try:
+        sr_full = support_resistance(full_df)
+    except Exception:
+        sr_full = {"support": [], "resistance": []}
+
+    # All-time high / low with dates.
+    try:
+        ath_idx = full_df["high"].idxmax()
+        atl_idx = full_df["low"].idxmin()
+        ath = {"price": float(full_df.loc[ath_idx, "high"]),
+               "date":  ath_idx.strftime("%Y-%m-%d") if hasattr(ath_idx, "strftime") else str(ath_idx)}
+        atl = {"price": float(full_df.loc[atl_idx, "low"]),
+               "date":  atl_idx.strftime("%Y-%m-%d") if hasattr(atl_idx, "strftime") else str(atl_idx)}
+    except Exception:
+        ath = atl = None
+
+    first_date = full_df.index[0].strftime("%Y-%m-%d") if hasattr(full_df.index[0], "strftime") else str(full_df.index[0])
+    last_date  = full_df.index[-1].strftime("%Y-%m-%d") if hasattr(full_df.index[-1], "strftime") else str(full_df.index[-1])
+
+    return {
+        "symbol": sym,
+        "bars_count": int(len(full_df)),
+        "first_date": first_date, "last_date": last_date,
+        "all_time_high": ath, "all_time_low": atl,
+        "setups": setups_fired,
+        "fib_full": fib_full,
+        "sr_full": {
+            "support": [float(x) for x in (sr_full.get("support") or [])],
+            "resistance": [float(x) for x in (sr_full.get("resistance") or [])],
+        },
+        "duration_s": round(time.time() - started, 2),
+    }
+
+
 def build_single_chart_response(symbol_raw: str) -> str:
     """Top-level builder called by the /chart route. Resolves symbol, fetches
     data, builds Snapshot + chart data + watches + cached equity analysis,
@@ -7446,7 +7927,11 @@ def build_single_chart_response(symbol_raw: str) -> str:
     if daily_df is None or daily_df.empty:
         return f"<html><body><h1>No data for {sym}</h1><p>yfinance returned no daily bars. Try a different ticker.</p><a href='/'>← Back</a></body></html>"
     snap = build_snapshot_for_symbol(sym, daily_df, weekly_df=weekly_df)
-    chart_data = build_multi_tf_chart_data(sym, daily_df, fetch_hourly=True)
+    # Wave 14 — page initially bakes only 1D / 1W / 1M (cheap from daily_df).
+    # Every other TF (1m, 3m, 5m, 15m, 30m, 45m, 1h, 2h, 3h, 4h, 3M, 6M, 12M,
+    # ALL) is lazy-fetched from /chart-tf on click. Saves a yfinance call per
+    # page load and avoids OOM under load.
+    chart_data = build_multi_tf_chart_data(sym, daily_df, fetch_hourly=False)
     try:    watches = find_watches(sym, daily_df)
     except Exception: watches = []
     # Equity Model — cached, won't fetch fresh if recent
@@ -7587,6 +8072,48 @@ def serve_live(tickers: list[str], port: int, refresh_seconds: int, cache_second
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(html_page.encode("utf-8"))
+            elif parsed.path == "/chart-tf":
+                # Wave 14 — lazy-load ONE timeframe's bars for the chart page.
+                # Called by the chart JS when the user clicks a TF button.
+                import json as _json
+                sym_q = qs.get("symbol", [""])[0].strip()
+                tf    = qs.get("tf", [""])[0].strip()
+                sym   = resolve_ticker(sym_q) if sym_q else None
+                if not sym or tf not in VALID_TFS:
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(_json.dumps({"error": "bad_params",
+                                                   "symbol": sym_q, "tf": tf,
+                                                   "valid_tfs": VALID_TFS}).encode())
+                    return
+                try:
+                    payload = serialize_tf_for_chart(sym, tf)
+                    payload["symbol"] = sym
+                    payload["tf"] = tf
+                except Exception as e:
+                    payload = {"error": str(e), "symbol": sym, "tf": tf,
+                               "candles": [], "volume": []}
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Cache-Control", "public, max-age=60")
+                self.end_headers()
+                self.wfile.write(_json.dumps(payload, default=float).encode())
+            elif parsed.path == "/chart-allhist":
+                # Wave 14 — opt-in all-time analysis (~15 min for big tickers).
+                # Triggered ONLY by the user clicking the "🔬 Run All-Time
+                # Analysis" button, NEVER automatically.
+                import json as _json
+                sym_q = qs.get("symbol", [""])[0].strip()
+                try:
+                    result = build_all_time_analysis(sym_q)
+                except Exception as e:
+                    result = {"error": str(e), "symbol": sym_q}
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Cache-Control", "public, max-age=3600")
+                self.end_headers()
+                self.wfile.write(_json.dumps(result, default=float).encode())
             elif parsed.path == "/health":
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")

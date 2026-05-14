@@ -85,13 +85,19 @@ html_mtf = cc.render_single_chart_html(
 # 1. Timeframe selector HTML buttons rendered
 # ---------------------------------------------------------------------------
 print("\n[1] Timeframe selector buttons in HTML")
-for tf in ["1H", "1D", "1W", "1M"]:
+# Wave 14 — '1H' renamed to lowercase '1h' (TradingView convention) and the
+# selector expanded from 4 buttons to 17. Verify the original 4 are still
+# represented (1h now lowercase) plus a spot-check on new TFs.
+for tf in ["1h", "1D", "1W", "1M"]:
     check(f"button for {tf}",
-          f'class="tf-btn" data-tf="{tf}"' in html_mtf)
+          f'data-tf="{tf}"' in html_mtf)
+for tf in ["1m", "5m", "30m", "4h", "ALL"]:
+    check(f"new Wave 14 TF {tf} button present",
+          f'data-tf="{tf}"' in html_mtf)
 check("'tf-bar' container div present",
-      'class="tf-bar"' in html_mtf)
+      'class="tf-bar' in html_mtf)
 check("legacy payload still gets the TF bar rendered",
-      'class="tf-bar"' in html_legacy)
+      'class="tf-bar' in html_legacy)
 
 
 # ---------------------------------------------------------------------------
@@ -146,8 +152,11 @@ check("MTF payload renders chart container",
 # 6. Time-visible flag flips for intraday
 # ---------------------------------------------------------------------------
 print("\n[6] Intraday axis configuration")
-check("timeVisible flag set conditionally for 1H",
-      "timeVisible: (tf === '1H')" in html_mtf
+# Wave 14 — single-1H conditional replaced with INTRADAY_TFS lookup
+# (covers 1m/3m/5m/15m/30m/45m/1h/2h/3h/4h all at once).
+check("timeVisible flag flips for intraday TFs (Wave 14: INTRADAY_TFS lookup)",
+      "INTRADAY_TFS.indexOf(tf)" in html_mtf
+      or "timeVisible: (tf === '1H')" in html_mtf
       or "timeVisible:(defaultTf==='1H')" in html_mtf)
 
 
@@ -155,10 +164,13 @@ check("timeVisible flag set conditionally for 1H",
 # 7. Unavailable TFs are disabled (yfinance limits)
 # ---------------------------------------------------------------------------
 print("\n[7] Unavailable timeframes are disabled gracefully")
-check("buttons get 'tf-unavailable' class when TF missing",
+# Wave 14 — the disabled-button code path remains for forward compatibility
+# (CSS class is still defined), even though every TF now lazy-loads on click
+# and shows a spinner / falls back to a toast on empty payloads.
+check("buttons CSS still has 'tf-unavailable' class (forward compat)",
       "tf-unavailable" in html_mtf)
-check("disabled tooltip mentions yfinance limit",
-      "yfinance limit" in html_mtf or "not available" in html_mtf)
+check("lazy-load shows user-facing toast on missing data (Wave 14)",
+      "No data for" in html_mtf or "not available" in html_mtf or "yfinance limit" in html_mtf)
 
 
 # ---------------------------------------------------------------------------
