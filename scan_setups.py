@@ -4116,15 +4116,34 @@ def render_html(
             <a href="https://www.tradingview.com/chart/?symbol={tv}" target="_blank">open on TradingView →</a>
           </span></h2>
           <div class="chart-row">
-            <div class="lwc-wrap">
-              <div class="tf-bar">
-                <button class="tf-btn" data-tf="1H">1H</button>
-                <button class="tf-btn" data-tf="1D">1D</button>
-                <button class="tf-btn" data-tf="1W">1W</button>
-                <button class="tf-btn" data-tf="1M">1M</button>
+            <div class="chart-host" data-symbol="{s.symbol}" data-chart-idx="setup_{i}">
+              <div class="chart-toolbar">
+                <div class="view-toggle">
+                  <button class="view-btn active" data-view="cc" data-target="setup_{i}">📊 CC View</button>
+                  <button class="view-btn" data-view="tv" data-target="setup_{i}">📈 TradingView</button>
+                </div>
+                <div class="chart-extras">
+                  <span class="countdown-badge" id="cd_setup_{i}">⏱ —</span>
+                  <button class="anno-btn" onclick="addAnnotation('{s.symbol}','setup_{i}','note')">✏ Note</button>
+                  <button class="anno-btn" onclick="addAnnotation('{s.symbol}','setup_{i}','line')">+ Line</button>
+                  <button class="anno-btn" onclick="clearAnnotations('{s.symbol}','setup_{i}')">⌫ Clear my drawings</button>
+                </div>
               </div>
-              {chart_body}
-              <div class="lwc-legend" id="lg_{i}"></div>
+              <div class="view-cc" data-view-id="setup_{i}">
+                <div class="lwc-wrap">
+                  <div class="tf-bar">
+                    <button class="tf-btn" data-tf="1H">1H</button>
+                    <button class="tf-btn" data-tf="1D">1D</button>
+                    <button class="tf-btn" data-tf="1W">1W</button>
+                    <button class="tf-btn" data-tf="1M">1M</button>
+                  </div>
+                  {chart_body}
+                  <div class="lwc-legend" id="lg_{i}"></div>
+                </div>
+              </div>
+              <div class="view-tv" data-view-id="setup_{i}" data-tv-symbol="{tv}" style="display:none">
+                <div class="tv-widget-host" id="tv_host_setup_{i}"></div>
+              </div>
             </div>
             <div class="setups-side">{levels_html}</div>
           </div>
@@ -4317,15 +4336,34 @@ def render_html(
             <a href="https://www.tradingview.com/chart/?symbol={tv}" target="_blank">open on TradingView →</a>
           </span></h2>
           <div class="chart-row">
-            <div class="lwc-wrap">
-              <div class="tf-bar">
-                <button class="tf-btn" data-tf="1H">1H</button>
-                <button class="tf-btn" data-tf="1D">1D</button>
-                <button class="tf-btn" data-tf="1W">1W</button>
-                <button class="tf-btn" data-tf="1M">1M</button>
+            <div class="chart-host" data-symbol="{snap.symbol}" data-chart-idx="snap_{snap_idx}">
+              <div class="chart-toolbar">
+                <div class="view-toggle">
+                  <button class="view-btn active" data-view="cc" data-target="snap_{snap_idx}">📊 CC View</button>
+                  <button class="view-btn" data-view="tv" data-target="snap_{snap_idx}">📈 TradingView</button>
+                </div>
+                <div class="chart-extras">
+                  <span class="countdown-badge" id="cd_snap_{snap_idx}">⏱ —</span>
+                  <button class="anno-btn" onclick="addAnnotation('{snap.symbol}','snap_{snap_idx}','note')">✏ Note</button>
+                  <button class="anno-btn" onclick="addAnnotation('{snap.symbol}','snap_{snap_idx}','line')">+ Line</button>
+                  <button class="anno-btn" onclick="clearAnnotations('{snap.symbol}','snap_{snap_idx}')">⌫ Clear my drawings</button>
+                </div>
               </div>
-              {_snap_chart_body(snap, snap_idx, chart_data_by_symbol)}
-              <div class="lwc-legend" id="lg_snap_{snap_idx}"></div>
+              <div class="view-cc" data-view-id="snap_{snap_idx}">
+                <div class="lwc-wrap">
+                  <div class="tf-bar">
+                    <button class="tf-btn" data-tf="1H">1H</button>
+                    <button class="tf-btn" data-tf="1D">1D</button>
+                    <button class="tf-btn" data-tf="1W">1W</button>
+                    <button class="tf-btn" data-tf="1M">1M</button>
+                  </div>
+                  {_snap_chart_body(snap, snap_idx, chart_data_by_symbol)}
+                  <div class="lwc-legend" id="lg_snap_{snap_idx}"></div>
+                </div>
+              </div>
+              <div class="view-tv" data-view-id="snap_{snap_idx}" data-tv-symbol="{tv}" style="display:none">
+                <div class="tv-widget-host" id="tv_host_snap_{snap_idx}"></div>
+              </div>
             </div>
             <div class="setups-side">
               <div class="setup-card">
@@ -4359,6 +4397,7 @@ def render_html(
 <html><head><meta charset="utf-8">
 <title>CC Trader — Live Setups</title>
 <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+<script src="https://s3.tradingview.com/tv.js"></script>
 <style>
   body {{ font-family: -apple-system, system-ui, sans-serif; background:#0a0f1c; color:#e2e8f0; margin:0; padding:24px; }}
   h1 {{ margin:0 0 4px 0; font-size:24px; }}
@@ -4375,6 +4414,21 @@ def render_html(
   .ticker-block {{ background:#0f172a; border-radius:12px; padding:16px; margin-top:18px; }}
   .chart-row {{ display:grid; grid-template-columns: minmax(0, 1fr) 380px; gap:16px; }}
   @media (max-width: 1100px) {{ .chart-row {{ grid-template-columns: 1fr; }} }}
+
+  /* Hybrid chart host — switches between CC LWC view and TradingView widget */
+  .chart-host {{ background:#0a0f1c; border-radius:8px; padding:8px; position:relative; }}
+  .chart-toolbar {{ display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:6px; flex-wrap:wrap; }}
+  .view-toggle {{ display:flex; gap:0; background:#0f172a; border-radius:6px; padding:2px; }}
+  .view-btn {{ padding:6px 14px; border:0; background:transparent; color:#94a3b8; border-radius:4px; font-size:11px; cursor:pointer; font-weight:600; font-family:ui-monospace,monospace; }}
+  .view-btn:hover {{ background:#1e293b; color:#e2e8f0; }}
+  .view-btn.active {{ background:#22c55e; color:#000; }}
+  .chart-extras {{ display:flex; gap:6px; align-items:center; flex-wrap:wrap; }}
+  .anno-btn {{ padding:5px 10px; background:#0a0f1c; color:#94a3b8; border:1px solid #1e293b; border-radius:4px; font-size:11px; cursor:pointer; font-family:ui-monospace,monospace; }}
+  .anno-btn:hover {{ background:#1e293b; color:#fbbf24; border-color:#fbbf24; }}
+  .countdown-badge {{ padding:4px 10px; background:#1e1b4b; color:#a78bfa; border-radius:4px; font-size:11px; font-family:ui-monospace,monospace; font-weight:600; }}
+  .tv-widget-host {{ height:600px; width:100%; }}
+  .tv-widget-host > div {{ height:600px !important; width:100% !important; }}
+  .tv-widget-host iframe {{ height:600px !important; width:100% !important; border:0 !important; border-radius:6px; }}
 
   /* Lightweight Charts container — entry/stop/targets drawn directly */
   .lwc-wrap {{ background:#0a0f1c; border-radius:8px; padding:8px; position:relative; }}
@@ -5468,6 +5522,197 @@ def render_html(
       onSizerChange();
     }}
 
+    // -------- View toggle (CC LWC vs TradingView widget) --------------------
+    window.cc_tv_loaded = window.cc_tv_loaded || {{}};
+
+    function loadTradingViewWidget(targetId, symbol) {{
+      if (window.cc_tv_loaded[targetId]) return;
+      var hostEl = document.getElementById('tv_host_' + targetId);
+      if (!hostEl) return;
+      if (typeof TradingView === 'undefined') {{
+        hostEl.innerHTML = '<div style="padding:30px;color:#64748b">TradingView library not loaded yet — refresh in a few seconds.</div>';
+        return;
+      }}
+      // Empty the host first (in case of re-mount)
+      hostEl.innerHTML = '<div id="tv_inner_' + targetId + '"></div>';
+      try {{
+        new TradingView.widget({{
+          container_id: 'tv_inner_' + targetId,
+          autosize: true,
+          symbol: symbol,
+          interval: 'D',
+          timezone: 'America/New_York',
+          theme: 'dark',
+          style: '1',
+          locale: 'en',
+          toolbar_bg: '#0a0f1c',
+          enable_publishing: false,
+          hide_top_toolbar: false,
+          hide_legend: false,
+          save_image: false,
+          allow_symbol_change: false,
+          withdateranges: true,
+          studies: [
+            'MAExp@tv-basicstudies', 'MAExp@tv-basicstudies', 'MAExp@tv-basicstudies',
+            'RSI@tv-basicstudies', 'Volume@tv-basicstudies',
+          ],
+          studies_overrides: {{
+            'moving average exponential.length': 55,
+          }},
+          drawings_access: {{ type: 'rectangle' }},
+          // Drawing tools available by default in the widget — no extra config needed
+        }});
+        window.cc_tv_loaded[targetId] = true;
+      }} catch(e) {{
+        hostEl.innerHTML = '<div style="padding:30px;color:#ef4444">TradingView widget failed: ' + e.message + '</div>';
+      }}
+    }}
+
+    // Wire up view-toggle buttons
+    function _bindViewToggles() {{
+      document.querySelectorAll('.view-btn').forEach(function(btn) {{
+        btn.addEventListener('click', function() {{
+          var target = btn.dataset.target;
+          var view = btn.dataset.view;
+          var host = btn.closest('.chart-host');
+          if (!host) return;
+          // Highlight active button
+          host.querySelectorAll('.view-btn').forEach(function(b) {{ b.classList.remove('active'); }});
+          btn.classList.add('active');
+          // Toggle visibility of CC vs TV containers
+          host.querySelectorAll('.view-cc, .view-tv').forEach(function(v) {{
+            v.style.display = 'none';
+          }});
+          if (view === 'cc') {{
+            var ccDiv = host.querySelector('.view-cc[data-view-id="' + target + '"]');
+            if (ccDiv) ccDiv.style.display = '';
+          }} else if (view === 'tv') {{
+            var tvDiv = host.querySelector('.view-tv[data-view-id="' + target + '"]');
+            if (tvDiv) {{
+              tvDiv.style.display = '';
+              var sym = tvDiv.dataset.tvSymbol;
+              loadTradingViewWidget(target, sym);
+            }}
+          }}
+        }});
+      }});
+    }}
+
+    // -------- User annotations on LWC chart -----------------------
+    function getAnnotations(sym) {{
+      try {{ return (JSON.parse(localStorage.getItem('cc_annotations') || '{{}}'))[sym] || []; }}
+      catch(_) {{ return []; }}
+    }}
+    function saveAnnotations(sym, arr) {{
+      var all;
+      try {{ all = JSON.parse(localStorage.getItem('cc_annotations') || '{{}}'); }} catch(_) {{ all = {{}}; }}
+      all[sym] = arr;
+      localStorage.setItem('cc_annotations', JSON.stringify(all));
+    }}
+
+    function addAnnotation(sym, chartId, kind) {{
+      var priceStr = prompt(kind === 'note'
+        ? 'Add a note — price level:'
+        : 'Add a horizontal line at price:');
+      if (!priceStr) return;
+      var price = parseFloat(priceStr);
+      if (isNaN(price)) return alert('Invalid price');
+      var text = kind === 'note'
+        ? (prompt('Note text (optional):') || '')
+        : '';
+      var color = kind === 'note' ? '#fbbf24' : '#22d3ee';
+      var arr = getAnnotations(sym);
+      arr.push({{
+        id: Date.now(), kind: kind, price: price, text: text, color: color,
+      }});
+      saveAnnotations(sym, arr);
+      applyAnnotationsToChart(sym, chartId);
+      showToast('✏ Added ' + (kind === 'note' ? 'note' : 'line') + ' at $' + price.toFixed(2));
+    }}
+
+    function clearAnnotations(sym, chartId) {{
+      if (!confirm('Remove all YOUR drawings for ' + sym + '? (scanner levels remain)')) return;
+      saveAnnotations(sym, []);
+      applyAnnotationsToChart(sym, chartId);
+    }}
+
+    function applyAnnotationsToChart(sym, chartId) {{
+      // The LWC chart handle was stored by initLightweightCharts under
+      // window.cc_chart_handles. Find the matching one by symbol.
+      var h = null;
+      for (var k in window.cc_chart_handles) {{
+        var entry = window.cc_chart_handles[k];
+        // The chart's div has data-symbol=sym; the handle has the chart instance
+        var divEl = document.getElementById(k);
+        if (divEl && divEl.getAttribute('data-symbol') === sym) {{
+          h = entry; break;
+        }}
+      }}
+      if (!h) return;
+      // Remove previous user lines
+      if (h.userLineHandles) {{
+        h.userLineHandles.forEach(function(pl) {{
+          try {{ h.candleSeries.removePriceLine(pl); }} catch(_) {{}}
+        }});
+      }}
+      // Add fresh user annotations as price lines
+      var annos = getAnnotations(sym);
+      h.userLineHandles = annos.map(function(a) {{
+        return h.candleSeries.createPriceLine({{
+          price: a.price,
+          color: a.color || '#fbbf24',
+          lineWidth: 2,
+          lineStyle: LightweightCharts.LineStyle.Solid,
+          axisLabelVisible: true,
+          title: '👤 ' + (a.text ? a.text + ' · ' : '') + '$' + a.price.toFixed(2),
+        }});
+      }});
+    }}
+
+    function applyAllAnnotationsOnLoad() {{
+      // After charts init, walk every chart-host div and re-apply its saved annotations
+      document.querySelectorAll('.chart-host').forEach(function(host) {{
+        var sym = host.dataset.symbol;
+        var chartIdx = host.dataset.chartIdx;
+        applyAnnotationsToChart(sym, chartIdx);
+      }});
+    }}
+
+    // -------- 24h countdown badge -----------------------
+    function updateCountdownBadges() {{
+      var now = new Date();
+      // For US stocks: next 4:00 PM ET (= 21:00 UTC during standard time, 20:00 UTC daylight savings).
+      // We'll use 20:00 UTC as a reasonable approximation (active session close).
+      // For crypto tickers (ending -USD): next 00:00 UTC.
+      document.querySelectorAll('.countdown-badge').forEach(function(badge) {{
+        var host = badge.closest('.chart-host');
+        if (!host) return;
+        var sym = host.dataset.symbol;
+        var isCrypto = sym && sym.indexOf('-USD') >= 0;
+        var target = new Date(now);
+        if (isCrypto) {{
+          target.setUTCHours(24, 0, 0, 0);
+        }} else {{
+          // Roughly NYSE close — 16:00 ET = 20:00 UTC (DST) or 21:00 UTC (standard).
+          // We'll target 20:00 UTC and skip weekends.
+          target.setUTCHours(20, 0, 0, 0);
+          if (target <= now) target.setUTCDate(target.getUTCDate() + 1);
+          // Skip Saturday/Sunday
+          while (target.getUTCDay() === 6 || target.getUTCDay() === 0) {{
+            target.setUTCDate(target.getUTCDate() + 1);
+          }}
+        }}
+        var diffMs = target - now;
+        if (diffMs < 0) diffMs = 0;
+        var totalMin = Math.floor(diffMs / 60000);
+        var hours = Math.floor(totalMin / 60);
+        var mins = totalMin % 60;
+        var label = isCrypto ? 'next UTC close' : 'next NYSE close';
+        badge.textContent = '⏱ ' + label + ': ' + hours + 'h ' + (mins < 10 ? '0' : '') + mins + 'm';
+        badge.title = 'Target: ' + target.toUTCString();
+      }});
+    }}
+
     window.addEventListener('load', () => {{
       applyStarUI();
       applyBellUI();
@@ -5476,6 +5721,10 @@ def render_html(
       renderMyListBar();
       renderMonitorTable();
       initLightweightCharts();
+      _bindViewToggles();
+      applyAllAnnotationsOnLoad();
+      updateCountdownBadges();
+      setInterval(updateCountdownBadges, 60000);   // refresh countdown every minute
       loadSavedAccount();
       renderJournal();
       renderManualSetups();

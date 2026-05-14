@@ -101,9 +101,12 @@ html = cc.render_html(
     chart_data_by_symbol=chart_data,
 )
 
-# Critical: NO old TradingView widget script anywhere
-check("No tv.js script tag (old widget removed)",
-      "s3.tradingview.com/tv.js" not in html)
+# Wave 10 reintroduced tv.js as a TOGGLEABLE alternative view (not the default).
+# The CC LWC view is the primary chart; TV widget is opt-in via the view toggle.
+check("tv.js script tag IS now present (Wave 10 hybrid view restored)",
+      "s3.tradingview.com/tv.js" in html)
+check("CC LWC view is the DEFAULT (active by default)",
+      'class="view-btn active" data-view="cc"' in html)
 check("Lightweight Charts CDN <script src> present",
       "lightweight-charts" in html and ".standalone.production.js" in html)
 check("Page exposes window.cc_charts_data",
