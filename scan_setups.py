@@ -1649,7 +1649,15 @@ def render_html(
             <div class="lwc-wrap">{_snap_chart_body(snap, snap_idx, chart_data_by_symbol)}<div class="lwc-legend" id="lg_snap_{snap_idx}"></div></div>
             <div class="setups-side">
               <div class="setup-card">
-                <div class="setup-head" style="color:#94a3b8">📊 Live snapshot · CC context</div>
+                <div class="setup-head" style="color:#94a3b8;display:flex;justify-content:space-between;align-items:center">
+                  <span>📊 {snap.symbol} · CC context</span>
+                  <span class="snap-actions">
+                    <button class="star-btn" data-symbol="{snap.symbol}" onclick="toggleStar(event,'{snap.symbol}')" title="Add to My Watchlist">☆</button>
+                    <button class="bell-btn" data-symbol="{snap.symbol}" data-price="{snap.current_price:.2f}" onclick="setAlarm(event,'{snap.symbol}',{snap.current_price:.2f})" title="Set price alarm">🔔</button>
+                    <button class="add-list-btn" onclick="addToMyListBySymbol(event,'{snap.symbol}')" title="Add to My Watchlist">+ List</button>
+                    <button class="add-list-btn" onclick="openManualSetupModal('{snap.symbol}',{snap.current_price:.2f})" title="Add manual setup for this ticker">✎ Setup</button>
+                  </span>
+                </div>
                 {_render_key_levels_panel(snap)}
                 {_render_flags(snap.context_flags)}
                 <div class="rationale" style="margin-top:10px">
@@ -1798,6 +1806,44 @@ def render_html(
   .setup-actions .take-btn {{ border-color:#22c55e; color:#22c55e; }}
   .setup-actions .take-btn:hover {{ background:#22c55e; color:#000; }}
 
+  /* Snapshot card action buttons (star, bell, +list, +setup) */
+  .snap-actions {{ display:flex; gap:4px; align-items:center; }}
+  .snap-actions .star-btn, .snap-actions .bell-btn {{ font-size:16px; padding:2px 4px; }}
+  .add-list-btn {{ padding:3px 8px; background:#0a0f1c; color:#fbbf24; border:1px solid #1e293b; border-radius:4px; cursor:pointer; font-size:10px; font-family:ui-monospace,monospace; }}
+  .add-list-btn:hover {{ background:#fbbf24; color:#000; }}
+
+  /* Manual setup modal */
+  .ms-modal {{ position:fixed; top:0; left:0; right:0; bottom:0; z-index:10000; display:flex; align-items:center; justify-content:center; }}
+  .ms-backdrop {{ position:absolute; inset:0; background:rgba(0,0,0,0.7); }}
+  .ms-dialog {{ position:relative; background:#0f172a; border:1px solid #334155; border-radius:12px; padding:24px; max-width:480px; width:90%; box-shadow:0 20px 60px rgba(0,0,0,0.6); z-index:1; }}
+  .ms-grid {{ display:grid; grid-template-columns:120px 1fr; gap:10px 12px; align-items:center; }}
+  .ms-grid label {{ color:#94a3b8; font-size:12px; }}
+  .ms-grid input, .ms-grid textarea {{ padding:7px 10px; border-radius:6px; border:1px solid #1e293b; background:#0a0f1c; color:#e2e8f0; font-family:ui-monospace,monospace; font-size:12px; width:100%; box-sizing:border-box; }}
+  .ms-radio {{ display:inline-flex; gap:6px; align-items:center; margin-right:14px; color:#e2e8f0; font-size:12px; }}
+  .ms-preview {{ padding:8px 10px; background:#0a0f1c; border-left:3px solid #fbbf24; border-radius:4px; font-size:11px; color:#94a3b8; font-family:ui-monospace,monospace; }}
+  .ms-buttons {{ display:flex; gap:10px; margin-top:20px; justify-content:flex-end; }}
+  .ms-cancel {{ padding:8px 16px; border-radius:6px; border:1px solid #334155; background:transparent; color:#94a3b8; cursor:pointer; }}
+  .ms-cancel:hover {{ background:#1e293b; color:#e2e8f0; }}
+  .ms-save {{ padding:8px 16px; border-radius:6px; border:0; background:#22c55e; color:#000; font-weight:700; cursor:pointer; }}
+  .ms-save:hover {{ background:#16a34a; }}
+
+  /* Manual setup cards — rendered client-side from localStorage */
+  .manual-card {{ background:#0f172a; border:1px solid #1e293b; border-left:4px solid #fbbf24; border-radius:8px; padding:14px; margin-top:10px; }}
+  .manual-head {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }}
+  .manual-head .mh-left {{ display:flex; gap:10px; align-items:center; }}
+  .manual-head b {{ font-size:15px; }}
+  .manual-pill {{ padding:2px 8px; border-radius:4px; background:#fbbf24; color:#000; font-size:10px; font-weight:700; letter-spacing:0.5px; font-family:ui-monospace,monospace; }}
+  .manual-grid {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(110px, 1fr)); gap:4px 16px; font-size:12px; }}
+  .manual-grid div {{ display:flex; justify-content:space-between; }}
+  .manual-notes {{ margin-top:8px; padding:8px; background:#0a0f1c; border-radius:4px; font-size:11px; color:#94a3b8; }}
+  .manual-actions {{ display:flex; gap:6px; margin-top:10px; padding-top:8px; border-top:1px solid #1e293b; flex-wrap:wrap; }}
+  .manual-actions button {{ flex:1; min-width:80px; padding:5px 8px; border-radius:4px; border:1px solid #1e293b; background:#0a0f1c; color:#94a3b8; cursor:pointer; font-size:11px; }}
+  .manual-actions button:hover {{ background:#1e293b; color:#e2e8f0; }}
+  .manual-actions .take-btn {{ border-color:#22c55e; color:#22c55e; }}
+  .manual-actions .take-btn:hover {{ background:#22c55e; color:#000; }}
+  .manual-actions .del-btn {{ border-color:#ef4444; color:#ef4444; flex:0; min-width:auto; padding:5px 10px; }}
+  .manual-actions .del-btn:hover {{ background:#ef4444; color:#000; }}
+
   /* Watching section — formed setups, not yet firing */
   .watching-grid {{ display:grid; grid-template-columns:repeat(auto-fill, minmax(360px, 1fr)); gap:12px; margin:12px 0 24px 0; }}
   .watching-card {{ background:#0f172a; border:1px solid #1e293b; border-left:4px solid #fbbf24; border-radius:8px; padding:12px; }}
@@ -1854,8 +1900,10 @@ def render_html(
     <label>Risk %:</label>
     <input id="risk-pct"  type="number" value="0.5"  step="0.1" oninput="onSizerChange()"/>
     <span class="size-out">Risk per trade: $<span id="risk-dollars">50.00</span></span>
+    <button class="tools-btn" onclick="openManualSetupModal('','')">✎ Add manual setup</button>
+    <button class="tools-btn" onclick="document.getElementById('manual-section').scrollIntoView({{behavior:'smooth'}})">📝 My setups</button>
     <button class="tools-btn" onclick="document.getElementById('journal-panel').scrollIntoView({{behavior:'smooth'}})">📒 Trade Journal</button>
-    <button class="tools-btn" onclick="if(confirm('Reset stars, alarms, and journal?')){{localStorage.removeItem('cc_stars');localStorage.removeItem('cc_alarms');localStorage.removeItem('cc_journal');location.reload();}}">Reset all data</button>
+    <button class="tools-btn" onclick="if(confirm('Reset stars, alarms, manual setups, and journal?')){{localStorage.removeItem('cc_stars');localStorage.removeItem('cc_alarms');localStorage.removeItem('cc_journal');localStorage.removeItem('cc_manual_setups');location.reload();}}">Reset all data</button>
   </div>
 
   <div class="legend">{legend_html}</div>
@@ -1878,9 +1926,57 @@ def render_html(
 
   {charts_html}
 
+  <div id="manual-section">
+    <h2 style="margin-top:32px">📝 My Manual Setups <span class="sub" id="manual-count">(empty)</span></h2>
+    <div id="manual-cards"></div>
+  </div>
+
   {watching_html}
 
   {snapshots_html}
+
+  <!-- Manual setup modal -->
+  <div id="manual-modal" class="ms-modal" style="display:none">
+    <div class="ms-backdrop" onclick="closeManualSetupModal()"></div>
+    <div class="ms-dialog">
+      <h3 style="margin:0 0 16px 0;color:#fbbf24">✎ Add Manual Setup</h3>
+      <div class="ms-grid">
+        <label>Symbol</label>
+        <input id="ms-symbol" placeholder="AAPL, BTC-USD, bitcoin..." autocomplete="off"/>
+
+        <label>Direction</label>
+        <div>
+          <label class="ms-radio"><input type="radio" name="ms-dir" value="long" checked/> ▲ Long</label>
+          <label class="ms-radio"><input type="radio" name="ms-dir" value="short"/> ▼ Short</label>
+        </div>
+
+        <label>Setup name</label>
+        <input id="ms-name" placeholder="e.g. Breakout above resistance" value="Manual setup"/>
+
+        <label>Entry $</label>
+        <input id="ms-entry" type="number" step="0.01" placeholder="0.00"/>
+
+        <label>Stop $</label>
+        <input id="ms-stop" type="number" step="0.01" placeholder="0.00"/>
+
+        <label>Target 1 $</label>
+        <input id="ms-t1" type="number" step="0.01" placeholder="0.00"/>
+
+        <label>Target 2 $ <span style="color:#64748b">(opt)</span></label>
+        <input id="ms-t2" type="number" step="0.01" placeholder="0.00"/>
+
+        <label>Notes <span style="color:#64748b">(opt)</span></label>
+        <textarea id="ms-notes" rows="3" placeholder="Thesis, what to watch for..."></textarea>
+
+        <label></label>
+        <div id="ms-preview" class="ms-preview">Fill in entry + stop + target1 to see R:R preview</div>
+      </div>
+      <div class="ms-buttons">
+        <button class="ms-cancel" onclick="closeManualSetupModal()">Cancel</button>
+        <button class="ms-save" onclick="saveManualSetup()">💾 Save setup</button>
+      </div>
+    </div>
+  </div>
 
   <div class="journal-panel" id="journal-panel">
     <h3>📒 Trade Journal</h3>
@@ -2317,6 +2413,208 @@ def render_html(
       URL.revokeObjectURL(url);
     }}
 
+    // --- "+ List" helper — add ticker to watchlist directly (no prompt) ----
+    function addToMyListBySymbol(ev, sym) {{
+      ev.stopPropagation();
+      var stars = getStars();
+      sym = (sym || '').toUpperCase();
+      if (!sym) return;
+      if (stars.indexOf(sym) < 0) stars.push(sym);
+      saveStars(stars);
+      applyStarUI();
+      renderMyListBar();
+      showToast('⭐ ' + sym + ' added to your watchlist');
+    }}
+
+    // --- Manual setup modal ---------------------------------------------
+    function openManualSetupModal(prefillSymbol, prefillPrice) {{
+      var modal = document.getElementById('manual-modal');
+      if (!modal) return;
+      modal.style.display = 'flex';
+      // Reset / prefill
+      document.getElementById('ms-symbol').value = prefillSymbol || '';
+      document.getElementById('ms-name').value = 'Manual setup';
+      document.getElementById('ms-notes').value = '';
+      var entry = document.getElementById('ms-entry');
+      var stop  = document.getElementById('ms-stop');
+      var t1    = document.getElementById('ms-t1');
+      var t2    = document.getElementById('ms-t2');
+      entry.value = prefillPrice ? prefillPrice : '';
+      stop.value = '';
+      t1.value = '';
+      t2.value = '';
+      // Live preview of R:R as user types
+      [entry, stop, t1, t2].forEach(el => {{
+        el.oninput = updateManualPreview;
+      }});
+      updateManualPreview();
+      document.getElementById('ms-symbol').focus();
+    }}
+    function closeManualSetupModal() {{
+      var modal = document.getElementById('manual-modal');
+      if (modal) modal.style.display = 'none';
+    }}
+    function updateManualPreview() {{
+      var entry = parseFloat(document.getElementById('ms-entry').value);
+      var stop  = parseFloat(document.getElementById('ms-stop').value);
+      var t1    = parseFloat(document.getElementById('ms-t1').value);
+      var dir   = document.querySelector('input[name="ms-dir"]:checked').value;
+      var preview = document.getElementById('ms-preview');
+      if (isNaN(entry) || isNaN(stop) || isNaN(t1)) {{
+        preview.textContent = 'Fill in entry + stop + target1 to see R:R preview';
+        preview.style.borderLeftColor = '#fbbf24';
+        return;
+      }}
+      var risk = Math.abs(entry - stop);
+      var reward = Math.abs(t1 - entry);
+      var rr = risk > 0 ? (reward / risk) : 0;
+      var movePct = entry > 0 ? (reward / entry * 100) : 0;
+      // Sanity check direction makes sense
+      var sane = (dir === 'long' && stop < entry && t1 > entry) ||
+                 (dir === 'short' && stop > entry && t1 < entry);
+      if (!sane) {{
+        preview.innerHTML = '⚠ Direction does not match levels.<br>'
+          + 'Long: stop &lt; entry &lt; target.   Short: target &lt; entry &lt; stop.';
+        preview.style.borderLeftColor = '#ef4444';
+        return;
+      }}
+      var rrColor = rr >= 2 ? '#22c55e' : (rr >= 1.5 ? '#f59e0b' : '#ef4444');
+      preview.innerHTML = 'R:R = <b style="color:' + rrColor + '">' + rr.toFixed(2) + 'R</b>'
+        + '   |   Risk/share $' + risk.toFixed(2)
+        + '   |   Reward to T1 $' + reward.toFixed(2) + ' (' + (dir === 'long' ? '+' : '-') + movePct.toFixed(1) + '%)';
+      preview.style.borderLeftColor = rrColor;
+    }}
+
+    function getManualSetups() {{
+      try {{ return JSON.parse(localStorage.getItem('cc_manual_setups') || '[]'); }} catch(_) {{ return []; }}
+    }}
+    function saveManualSetups(arr) {{ localStorage.setItem('cc_manual_setups', JSON.stringify(arr)); }}
+
+    function saveManualSetup() {{
+      var symbol = document.getElementById('ms-symbol').value.trim().toUpperCase();
+      var name   = document.getElementById('ms-name').value.trim() || 'Manual setup';
+      var dir    = document.querySelector('input[name="ms-dir"]:checked').value;
+      var entry  = parseFloat(document.getElementById('ms-entry').value);
+      var stop   = parseFloat(document.getElementById('ms-stop').value);
+      var t1     = parseFloat(document.getElementById('ms-t1').value);
+      var t2raw  = document.getElementById('ms-t2').value;
+      var t2     = t2raw === '' ? null : parseFloat(t2raw);
+      var notes  = document.getElementById('ms-notes').value.trim();
+
+      if (!symbol)          return alert('Symbol is required');
+      if (isNaN(entry))     return alert('Entry price is required');
+      if (isNaN(stop))      return alert('Stop price is required');
+      if (isNaN(t1))        return alert('Target 1 price is required');
+      var sane = (dir === 'long' && stop < entry && t1 > entry) ||
+                 (dir === 'short' && stop > entry && t1 < entry);
+      if (!sane) {{
+        if (!confirm('Stop/target placement looks inconsistent with ' + dir + ' direction. Save anyway?')) return;
+      }}
+
+      var setups = getManualSetups();
+      setups.unshift({{
+        id: Date.now(),
+        created: new Date().toISOString(),
+        symbol: symbol, name: name, direction: dir,
+        entry: entry, stop: stop, t1: t1, t2: t2,
+        notes: notes,
+      }});
+      saveManualSetups(setups);
+      // Also star the ticker so it joins the watchlist
+      var stars = getStars();
+      if (stars.indexOf(symbol) < 0) {{
+        stars.push(symbol);
+        saveStars(stars);
+        applyStarUI();
+        renderMyListBar();
+      }}
+      closeManualSetupModal();
+      renderManualSetups();
+      // Scroll to the new card
+      setTimeout(function() {{
+        document.getElementById('manual-section').scrollIntoView({{behavior:'smooth'}});
+      }}, 50);
+      showToast('💾 Saved manual setup: ' + symbol + ' ' + dir);
+    }}
+    function deleteManualSetup(id) {{
+      if (!confirm('Delete this manual setup?')) return;
+      saveManualSetups(getManualSetups().filter(x => x.id !== id));
+      renderManualSetups();
+    }}
+    function editManualSetup(id) {{
+      var s = getManualSetups().find(x => x.id === id);
+      if (!s) return;
+      // Open modal pre-filled, and replace save handler to update-in-place
+      openManualSetupModal(s.symbol, s.entry);
+      document.getElementById('ms-name').value = s.name;
+      document.getElementById('ms-stop').value = s.stop;
+      document.getElementById('ms-t1').value = s.t1;
+      document.getElementById('ms-t2').value = s.t2 === null ? '' : s.t2;
+      document.getElementById('ms-notes').value = s.notes || '';
+      document.querySelectorAll('input[name="ms-dir"]').forEach(r => r.checked = (r.value === s.direction));
+      updateManualPreview();
+      // Replace Save button behavior — delete old then save new
+      var saveBtn = document.querySelector('.ms-save');
+      saveBtn.onclick = function() {{
+        saveManualSetups(getManualSetups().filter(x => x.id !== id));
+        saveManualSetup();
+        saveBtn.onclick = null;   // restore default
+      }};
+    }}
+
+    function renderManualSetups() {{
+      var setups = getManualSetups();
+      var box = document.getElementById('manual-cards');
+      var label = document.getElementById('manual-count');
+      if (!box) return;
+      if (label) label.textContent = setups.length === 0 ? '(empty)' : '(' + setups.length + ')';
+      if (!setups.length) {{
+        box.innerHTML = '<div style="color:#64748b;padding:14px;font-size:12px">No manual setups yet. Click <b>✎ Add manual setup</b> above to create one, or use ✎ Setup button on any snapshot card.</div>';
+        return;
+      }}
+      box.innerHTML = setups.map(s => {{
+        var dirColor = s.direction === 'long' ? '#22c55e' : '#ef4444';
+        var arrow = s.direction === 'long' ? '▲' : '▼';
+        var risk = Math.abs(s.entry - s.stop);
+        var rr = risk > 0 ? Math.abs(s.t1 - s.entry) / risk : 0;
+        var move = s.entry > 0 ? Math.abs(s.t1 - s.entry) / s.entry * 100 : 0;
+        var t2html = s.t2 !== null && !isNaN(s.t2) ?
+          '<div><span class="lbl">Target 2</span><span class="val" style="color:#22c55e">$' + s.t2.toFixed(2) + '</span></div>' : '';
+        return ''
+          + '<div class="manual-card">'
+          + '  <div class="manual-head">'
+          + '    <div class="mh-left">'
+          + '      <span class="manual-pill">MANUAL</span>'
+          + '      <span style="color:' + dirColor + ';font-weight:700">' + arrow + ' ' + s.direction.toUpperCase() + '</span>'
+          + '      <b>' + s.symbol + '</b>'
+          + '      <span style="color:#94a3b8;font-size:12px">· ' + s.name + '</span>'
+          + '    </div>'
+          + '    <div style="color:#64748b;font-size:10px">' + (s.created || '').slice(0, 10) + '</div>'
+          + '  </div>'
+          + '  <div class="manual-grid">'
+          + '    <div><span class="lbl">Entry</span><span class="val">$' + s.entry.toFixed(2) + '</span></div>'
+          + '    <div><span class="lbl">Stop</span><span class="val" style="color:#ef4444">$' + s.stop.toFixed(2) + '</span></div>'
+          + '    <div><span class="lbl">Target 1</span><span class="val" style="color:#22c55e">$' + s.t1.toFixed(2) + '</span></div>'
+          +      t2html
+          + '    <div><span class="lbl">R:R</span><span class="val" style="color:' + (rr >= 2 ? '#22c55e' : '#f59e0b') + '">' + rr.toFixed(2) + 'R</span></div>'
+          + '    <div><span class="lbl">Move</span><span class="val">' + (s.direction === 'long' ? '+' : '-') + move.toFixed(1) + '%</span></div>'
+          + '  </div>'
+          + (s.notes ? '<div class="manual-notes">📝 ' + s.notes + '</div>' : '')
+          + '  <div class="manual-actions">'
+          + '    <button onclick="sizeTrade(\\'' + s.symbol + '\\',' + s.entry + ',' + s.stop + ')">📐 Size this</button>'
+          + '    <button class="take-btn" onclick="takeTrade(\\'' + s.symbol + '\\',\\'' + s.name.replace(/[\\\\\\\\\\\\\\']/g, '') + ' (manual)\\',\\''+s.direction+'\\','+s.entry+','+s.stop+','+s.t1+','+(s.t2||0)+')">▶ Take</button>'
+          + '    <button onclick="editManualSetup(' + s.id + ')">✎ Edit</button>'
+          + '    <button class="del-btn" onclick="deleteManualSetup(' + s.id + ')" title="Delete">✕</button>'
+          + '  </div>'
+          + '</div>';
+      }}).join('');
+    }}
+
+    // Close modal with ESC
+    document.addEventListener('keydown', function(e) {{
+      if (e.key === 'Escape') closeManualSetupModal();
+    }});
+
     function loadSavedAccount() {{
       try {{
         var s = JSON.parse(localStorage.getItem('cc_acct') || '{{}}');
@@ -2335,6 +2633,7 @@ def render_html(
       initLightweightCharts();
       loadSavedAccount();
       renderJournal();
+      renderManualSetups();
       if (Notification.permission === 'default') Notification.requestPermission();
     }});
   </script>
@@ -2857,7 +3156,10 @@ def serve_live(tickers: list[str], port: int, refresh_seconds: int, cache_second
                         continue
                     state["running"] = True
                 try:
-                    _, _, html = run_full_scan(tickers)
+                    # always_show=True so every watchlist ticker gets a
+                    # snapshot card visible by default, not just the ones
+                    # where a setup fired today.
+                    _, _, html = run_full_scan(tickers, always_show=True)
                     with state_lock:
                         state["html"] = inject_meta_refresh(html, refresh_seconds)
                         state["last_run"] = time.time()
@@ -2983,8 +3285,9 @@ def main() -> int:
     if serve_mode:
         return serve_live(tickers, port=port, refresh_seconds=refresh_seconds, cache_seconds=cache_seconds)
 
-    # one-shot mode (the original behavior)
-    _, _, html = run_full_scan(tickers)
+    # one-shot mode — also show every watchlist ticker by default so the
+    # operator sees the full universe, not just fired setups.
+    _, _, html = run_full_scan(tickers, always_show=True)
     out = Path("cc_setups_report.html").resolve()
     out.write_text(html, encoding="utf-8")
     print(f"✓ Report saved to:  {out}")
