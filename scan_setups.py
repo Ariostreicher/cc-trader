@@ -3423,12 +3423,15 @@ def scan_one(symbol: str) -> tuple[Optional[pd.DataFrame], list[Setup], Optional
         import io, contextlib
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
+            # Pull 5 years of daily history — captures multi-year highs/lows
+            # (e.g., CELH 2024 ATH ~$100 → $20 → recovery). CC traders work
+            # off these multi-year levels as primary support/resistance.
             df = yf.download(
-                sym, period="2y", interval="1d",
+                sym, period="5y", interval="1d",
                 auto_adjust=True, progress=False, threads=False,
             )
             weekly = yf.download(
-                sym, period="3y", interval="1wk",
+                sym, period="10y", interval="1wk",
                 auto_adjust=True, progress=False, threads=False,
             )
     except Exception:
@@ -6150,22 +6153,27 @@ def run_full_scan(
             "default_tf": "1D",
             "timeframes": {
               "1H":  {candles, volume, ema_55, ema_100, ema_200},   # last ~60 days hourly
-              "1D":  {...}, # last 260 daily bars
-              "1W":  {...}, # weekly resampled from daily
-              "1M":  {...}, # monthly resampled from daily
+              "1D":  {...}, # last ~4 years of daily bars
+              "1W":  {...}, # all available weekly bars
+              "1M":  {...}, # all available monthly bars
             }
           }
         """
-        d = daily_df.tail(260).copy()
+        # 1000 daily bars ≈ 4 years — captures multi-year highs/lows AND keeps
+        # LWC fast. CC's multi-year levels (e.g. CELH 2024 ATH at ~$100) are
+        # required context.
+        d = daily_df.tail(1000).copy()
         tfs: dict[str, dict] = {}
         tfs["1D"] = _serialize_tf(d, daily_format=True)
         # Weekly + Monthly are resampled from daily — cheap & always available
         weekly_full = resample_period(daily_df, "W")
         if not weekly_full.empty:
-            tfs["1W"] = _serialize_tf(weekly_full.tail(260), daily_format=True)
+            # 520 weekly bars = 10 years (covers all CC reference moves)
+            tfs["1W"] = _serialize_tf(weekly_full.tail(520), daily_format=True)
         monthly_full = resample_period(daily_df, "ME")
         if not monthly_full.empty:
-            tfs["1M"] = _serialize_tf(monthly_full.tail(120), daily_format=True)
+            # 240 monthly bars = 20 years (max useful)
+            tfs["1M"] = _serialize_tf(monthly_full.tail(240), daily_format=True)
         # Hourly is a separate yfinance fetch — only ~60 days available
         hourly = _fetch_hourly(sym_u)
         if hourly is not None and not hourly.empty:
@@ -6215,7 +6223,9 @@ def run_full_scan(
             e55 = e100 = e200 = rsi_v = None
             px = float(close.iloc[-1]) if len(close) else 0.0
         try:
-            sr = support_resistance(daily_df.tail(200))
+            # Use multi-year history so deeper S/R levels (e.g. CELH 2024 ATH
+            # at ~$100) show up alongside the recent ones.
+            sr = support_resistance(daily_df.tail(750))
         except Exception:
             sr = {"support": [], "resistance": []}
         # Best-effort bid/ask + liquidity from yfinance fast_info.
@@ -6237,9 +6247,11 @@ def run_full_scan(
                 avg_vol = float(daily_df["volume"].iloc[-21:-1].mean())
         except Exception:
             pass
-        # Wave 1: comprehensive level overlays
+        # Wave 1: comprehensive level overlays.
+        # Use a multi-year lookback (750 bars ≈ 3y) so the Fib ladder is
+        # anchored to the major swing, not just the last 12 months.
         try:
-            fib_data = compute_fib_levels(daily_df, lookback_bars=250)
+            fib_data = compute_fib_levels(daily_df, lookback_bars=750)
         except Exception:
             fib_data = None
         try:
