@@ -279,6 +279,30 @@ finally:
 
 
 # ---------------------------------------------------------------------------
+# 9b. Wave 14 hotfix — default visible range per TF (no auto-zoom-out)
+# ---------------------------------------------------------------------------
+print("\n[9b] Default visible bars per TF (hotfix: 1m should NOT show 2023)")
+check("DEFAULT_VISIBLE_BARS map defined in JS",
+      "DEFAULT_VISIBLE_BARS" in html_chart)
+check("1m default = 60 bars (~1 hour, not 7 days)",
+      "'1m': 60" in html_chart)
+check("1h default = 50 bars (~1 week)",
+      "'1h': 50" in html_chart)
+check("1D default = 120 bars (~6 months)",
+      "'1D': 120" in html_chart)
+check("ALL default = 240 bars (~20 yrs monthly)",
+      "'ALL': 240" in html_chart)
+check("setVisibleLogicalRange used (not fitContent everywhere)",
+      "setVisibleLogicalRange" in html_chart)
+check("_setDefaultVisibleRange helper defined",
+      "function _setDefaultVisibleRange(" in html_chart)
+check("fallback to fitContent when data shorter than default window",
+      "fitContent()" in html_chart and "<= n" in html_chart)
+check("initial load also applies default visible window",
+      "defaultBars" in html_chart)
+
+
+# ---------------------------------------------------------------------------
 # 10. Regression — Wave 13 features still intact
 # ---------------------------------------------------------------------------
 print("\n[10] Regression — earlier waves still work")

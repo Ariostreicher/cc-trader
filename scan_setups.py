@@ -7561,7 +7561,27 @@ def render_single_chart_html(
         + '<div class="lg-row"><span class="lg-dot" style="background:#64748b"></span> EMA 200</div>'
         + '<div class="lg-row"><span class="lg-px">' + sym + '</span></div>';
       }}
-      chart.timeScale().fitContent();
+      // Wave 14 hotfix — show ONLY the most recent N bars on initial load
+      // (default TF is 1D, so ~120 bars = ~6 months). Without this, charts
+      // could open zoomed-out to 4+ years which buries the recent action.
+      (function() {{
+        var defaultBars = {{
+          '1m': 60,  '3m': 60,  '5m': 78,  '15m': 52, '30m': 52, '45m': 40,
+          '1h': 50,  '2h': 40,  '3h': 30,  '4h': 30,
+          '1D': 120, '1W': 104, '1M': 60,
+          '3M': 40,  '6M': 20,  '12M': 15, 'ALL': 240,
+        }}[defaultTf] || 120;
+        var n = initial.candles ? initial.candles.length : 0;
+        if (n > defaultBars) {{
+          try {{
+            chart.timeScale().setVisibleLogicalRange({{ from: n - defaultBars, to: n - 1 }});
+          }} catch (e) {{
+            chart.timeScale().fitContent();
+          }}
+        }} else {{
+          chart.timeScale().fitContent();
+        }}
+      }})();
       new ResizeObserver(function() {{ chart.applyOptions({{ width: div.clientWidth, height: div.clientHeight }}); }}).observe(div);
 
       // -------- Hover tooltips on chart lines (Wave 13) ----------------
@@ -7677,6 +7697,52 @@ def render_single_chart_html(
     // Wave 14 — Intraday TF set (must render with timeVisible=true).
     var INTRADAY_TFS = ['1m','3m','5m','15m','30m','45m','1h','2h','3h','4h'];
 
+    // Wave 14 (hotfix) — Default visible bars per TF.
+    // When you switch to 1m, we DON'T want to show 7 days of 1-minute data
+    // crushed onto the screen — that's unreadable. We show ONLY the most
+    // recent N bars by default. The user can scroll back manually if they
+    // want older history. Each entry = "how many recent bars to show".
+    // Reasoning per TF (so the default view is actually useful):
+    //   1m  → last ~60 bars   = ~1 hour
+    //   3m  → last 60 bars    = ~3 hours
+    //   5m  → last 78 bars    = ~1 RTH trading day
+    //   15m → last 52 bars    = ~2 RTH days
+    //   30m → last 52 bars    = ~4 RTH days
+    //   45m → last 40 bars    = ~5 RTH days
+    //   1h  → last 50 bars    = ~1 week of RTH
+    //   2h  → last 40 bars    = ~1.5 weeks
+    //   3h  → last 30 bars    = ~2 weeks
+    //   4h  → last 30 bars    = ~3 weeks
+    //   1D  → last 120 bars   = ~6 months
+    //   1W  → last 104 bars   = ~2 years
+    //   1M  → last 60 bars    = ~5 years
+    //   3M  → last 40 bars    = ~10 years (quarterly)
+    //   6M  → last 20 bars    = ~10 years (semi-annual)
+    //   12M → last 15 bars    = ~15 years (annual)
+    //   ALL → last 240 bars   = ~20 years monthly (full picture)
+    var DEFAULT_VISIBLE_BARS = {{
+      '1m': 60,  '3m': 60,  '5m': 78,  '15m': 52, '30m': 52, '45m': 40,
+      '1h': 50,  '2h': 40,  '3h': 30,  '4h': 30,
+      '1D': 120, '1W': 104, '1M': 60,
+      '3M': 40,  '6M': 20,  '12M': 15, 'ALL': 240,
+    }};
+
+    function _setDefaultVisibleRange(h, tf, dataLen) {{
+      var n = DEFAULT_VISIBLE_BARS[tf] || 120;
+      if (dataLen <= n) {{
+        // Less data than the default window — just fit everything.
+        h.chart.timeScale().fitContent();
+        return;
+      }}
+      try {{
+        h.chart.timeScale().setVisibleLogicalRange({{
+          from: dataLen - n, to: dataLen - 1
+        }});
+      }} catch (e) {{
+        h.chart.timeScale().fitContent();
+      }}
+    }}
+
     function _applyTfData(h, tf, tfData) {{
       if (!tfData || !tfData.candles || !tfData.candles.length) return false;
       h.candleSeries.setData(tfData.candles);
@@ -7685,7 +7751,10 @@ def render_single_chart_html(
         if (h.emaSeries[k]) h.emaSeries[k].setData(tfData[k] || []);
       }});
       h.chart.applyOptions({{ timeScale: {{ timeVisible: INTRADAY_TFS.indexOf(tf) >= 0 }} }});
-      h.chart.timeScale().fitContent();
+      // Show only the most recent N bars by default — user can scroll back
+      // manually for older history. fitContent() (which crushed 7 days of 1m
+      // bars onto the screen) is no longer the default behavior.
+      _setDefaultVisibleRange(h, tf, tfData.candles.length);
       h.currentTf = tf;
       return true;
     }}
