@@ -4672,11 +4672,11 @@ def render_html(
   </div>
 
   <div class="topbar">
-    <form method="GET" action="/" class="search-form">
+    <form method="GET" action="/" class="search-form" id="search-form" onsubmit="return handleScanSubmit(event);">
       <input name="symbols" id="search-input" list="ticker-suggestions"
-             placeholder="🔍 Scan ad-hoc — type 'bitcoin', 'apple', 'GLD', 'AAPL', 'BTC-USD'..." autocomplete="off"/>
+             placeholder="🔍 Add to watchlist — type 'bitcoin', 'apple', 'GLD', 'AAPL', 'BTC-USD'..." autocomplete="off"/>
       <datalist id="ticker-suggestions">{ticker_suggestions_html}</datalist>
-      <button type="submit">Scan</button>
+      <button type="submit">Add & Scan</button>
       <a href="/" class="reset-link">↩ Default watchlist</a>
     </form>
 
@@ -5113,6 +5113,40 @@ def render_html(
         }})
         .catch(function(err) {{ showToast('⚠ ' + sym + ' scan failed'); }});
     }}
+    // Wave 17 — Search bar submit handler. Instead of running a temporary
+    // ad-hoc scan that vanishes on reload, ADD the searched ticker(s) to
+    // the persisted watchlist + trigger an immediate full-CC analysis.
+    // After a short delay (so the immediate scan call hits the wire) the
+    // page reloads so the user sees the freshly-analyzed ticker(s) in the
+    // main table — same flow as everything else in CC_2026.
+    function handleScanSubmit(ev) {{
+      if (ev && ev.preventDefault) ev.preventDefault();
+      var input = document.getElementById('search-input');
+      if (!input) return false;
+      var raw = (input.value || '').trim();
+      if (!raw) return false;
+      var stars = getStars();
+      var added = [];
+      raw.split(',').map(function(x) {{ return x.trim(); }}).filter(Boolean).forEach(function(t) {{
+        var sym = t.toUpperCase();
+        if (sym && stars.indexOf(sym) < 0) {{ stars.push(sym); added.push(sym); }}
+      }});
+      saveStars(stars);
+      // Persist to backend so the next background-scan cycle includes it.
+      syncWatchlistToBackend();
+      // Trigger immediate full-CC scan for each new ticker so we get the
+      // analysis without waiting for the 5-min cycle.
+      added.forEach(function(s) {{ triggerImmediateScan(s); }});
+      showToast(added.length
+        ? ('⚡ Added ' + added.join(', ') + ' to watchlist — analyzing now…')
+        : '⭐ Already in watchlist');
+      input.value = '';
+      // Wait ~2s for backend POSTs to land + immediate scans to start,
+      // then reload to pick up the merged universe in the next render.
+      setTimeout(function() {{ window.location.href = '/'; }}, 2200);
+      return false;
+    }}
+
     function addToMyList() {{
       const raw = prompt("Add ticker(s) to your watchlist:\\n(comma-separated, e.g.  AAPL, MSFT, BTC-USD, bitcoin, apple)\\n\\nThey'll be analyzed automatically (38 detectors + Key Levels + Fib + AI).");
       if (!raw) return;
