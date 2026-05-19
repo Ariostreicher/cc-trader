@@ -29,21 +29,26 @@ def check(name, ok, detail=""):
 # ---------------------------------------------------------------------------
 # 1. Custom watchlist UI elements
 # ---------------------------------------------------------------------------
-print("\n[1] Custom watchlist UI")
+print("\n[1] Custom watchlist UI — Wave 20: REMOVED, unified into Add & Scan")
 html = cc.render_html(setups=[], scanned=0, duration_s=0.0)
 
-check("My Watchlist bar exists",        'class="mylist-bar"' in html)
-check("'+ Add ticker' button exists",   '+ Add ticker' in html)
-check("'Scan my list now' button exists", '🎯 Scan my list' in html)
-check("'Clear all' button exists",      'clear-my-list' in html and 'Clear all' in html)
-check("addToMyList() JS function",      'function addToMyList()' in html)
-check("removeFromMyList() JS function", 'function removeFromMyList(' in html)
-check("scanMyList() JS function",       'function scanMyList()' in html)
-check("clearMyList() JS function",      'function clearMyList()' in html)
-check("renderMyListBar() JS function",  'function renderMyListBar()' in html)
-check("scan-my-list redirects to /?symbols=",
-      "window.location.href = '/?symbols=' +" in html)
-check("Filter is renamed 'My list'",    '⭐ My list' in html)
+# Wave 20 — the dedicated 'My Watchlist' bar + 'My list' filter were deleted.
+# The 'Add & Scan' search bar handles the watchlist invisibly now (one list).
+check("My Watchlist bar removed",        'class="mylist-bar"' not in html)
+check("'+ Add ticker' button HTML removed",
+      '">+ Add ticker</button>' not in html)
+check("'Scan my list now' button removed", '🎯 Scan my list' not in html)
+check("'Clear all' button removed",      'clear-my-list' not in html)
+check("'⭐ My list' filter removed",     '⭐ My list' not in html)
+# JS functions still defined as no-ops for backwards-compat with any
+# inline-onclick attribute that might still call them.
+check("addToMyList() JS still defined (no-op)",   'function addToMyList()' in html)
+check("removeFromMyList() JS still defined",      'function removeFromMyList(' in html)
+check("clearMyList() JS still defined",           'function clearMyList()' in html)
+# Add & Scan search bar IS the watchlist now.
+check("Add & Scan button is the new entry point",
+      'Add &amp; Scan' in html or 'Add & Scan' in html)
+check("handleScanSubmit handler wired",  "handleScanSubmit(event)" in html)
 
 
 # ---------------------------------------------------------------------------

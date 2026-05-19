@@ -54,13 +54,14 @@ html = cc.render_html(
 # ---------------------------------------------------------------------------
 # 1. Snapshot card action buttons
 # ---------------------------------------------------------------------------
-print("\n[1] Snapshot card star / bell / +list / +setup buttons")
-check("star button on snapshot card",
-      'class="star-btn" data-symbol="AAPL"' in html)
+print("\n[1] Snapshot card action buttons (Wave 20: star + List removed)")
+# Wave 20 — star button + 'My Watchlist' removed; bell + Setup remain.
+check("star button removed from snapshot card (Wave 20)",
+      'class="star-btn" data-symbol="AAPL"' not in html)
 check("bell button on snapshot card",
       'class="bell-btn" data-symbol="AAPL"' in html)
-check("'+ List' button on snapshot card",
-      "+ List" in html and "addToMyListBySymbol" in html)
+check("'+ List' button HTML removed (Wave 20: unified into search bar)",
+      '">+ List</button>' not in html)
 check("'✎ Setup' button on snapshot card",
       "✎ Setup" in html and "openManualSetupModal('AAPL'," in html)
 check("snap-actions wrapper present",
@@ -168,8 +169,8 @@ check("Trade Journal panel still present",
       'id="journal-panel"' in html)
 check("Sizer bar still present",
       'id="acct-size"' in html)
-check("My Watchlist bar still present",
-      'class="mylist-bar"' in html)
+check("My Watchlist bar removed (Wave 20: unified into search bar)",
+      'class="mylist-bar"' not in html)
 check("Watching section logic still present",
       "Watching — setups forming" in html or True)  # only present when watches exist
 check("Regime strip still present",

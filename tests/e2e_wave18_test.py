@@ -42,7 +42,10 @@ s = cc.Setup(
     context_flags=[],
 )
 plan = cc._compute_plan_text(s)
-check("plan mentions Long now",     "Long now" in plan)
+check("plan phrased as forward-looking 'IF holds above'",
+      "IF holds above" in plan)
+check("plan tells you to 'ride long'",  "ride <b>long</b>" in plan)
+check("plan has explicit 'ABORT' condition",  "ABORT" in plan)
 check("plan shows entry $200.00",   "$200.00" in plan)
 check("plan shows target $210.00",  "$210.00" in plan)
 check("plan shows R:R (2.0R)",      "2.0R" in plan)
@@ -61,7 +64,9 @@ sh = cc.Setup(
     context_flags=[],
 )
 short_plan = cc._compute_plan_text(sh)
-check("short plan says 'Short now'", "Short now" in short_plan)
+check("short plan phrased as 'IF holds below'",
+      "IF holds below" in short_plan)
+check("short plan tells you to 'ride short'",  "ride <b>short</b>" in short_plan)
 check("short plan cites 'Second 18.pdf'", "Second 18.pdf" in short_plan)
 
 
@@ -163,8 +168,8 @@ check("WATCH legend chip rendered",
       "👁 WATCH" in html_main)
 check("WATCH chip shows count 2",
       "👁 WATCH · 2" in html_main)
-check("fired row has 'Long now' plan",
-      "Long now" in html_main)
+check("fired row has forward-looking 'IF holds above' plan",
+      "IF holds above" in html_main)
 check("LULU forming row renders",
       'data-symbol="LULU"' in html_main and "Wait for $187.50" in html_main)
 check("MSFT forming row renders",

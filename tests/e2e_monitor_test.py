@@ -95,8 +95,8 @@ check("TSLA RSI ~42 present in row",
 # 4. Row action buttons
 # ---------------------------------------------------------------------------
 print("\n[4] Per-row actions")
-check("star button in each row",
-      'class="star-btn" data-symbol="AAPL"' in html)
+check("star button removed from rows (Wave 20)",
+      'class="star-btn" data-symbol="AAPL"' not in html)
 check("bell button in each row",
       'class="bell-btn" data-symbol="AAPL"' in html)
 check("'✎ Setup' button to open manual setup",
@@ -171,8 +171,8 @@ print("\n[8] Regressions")
 check("manual setup section still present",  'id="manual-section"' in html)
 check("journal panel still present",          'id="journal-panel"' in html)
 check("sizer bar still present",              'id="acct-size"' in html)
-check("my-watchlist bar still present",       'class="mylist-bar"' in html)
-check("snapshot card star buttons still present",
+check("my-watchlist bar removed (Wave 20)",   'class="mylist-bar"' not in html)
+check("snapshot card actions wrapper still present (without stars)",
       'class="snap-actions"' in html)
 check("Lightweight Charts library still loaded",
       "lightweight-charts" in html)

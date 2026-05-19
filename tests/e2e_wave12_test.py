@@ -114,8 +114,8 @@ check("main page still has Trade Journal panel",
       'id="journal-panel"' in html_main)
 check("main page still has Manual setup section",
       'id="manual-section"' in html_main)
-check("main page still has My Watchlist bar",
-      'class="mylist-bar"' in html_main)
+check("My Watchlist bar removed (Wave 20 — unified into Add & Scan)",
+      'class="mylist-bar"' not in html_main)
 check("main page still has Monitor table",
       'id="monitor-table"' in html_main)
 check("main page still has search box",

@@ -3513,18 +3513,25 @@ def _compute_verdict(s: "Setup") -> tuple[str, str, str]:
 # No silent shortcuts: if no CC concept maps to the level, we say so.
 # ---------------------------------------------------------------------------
 def _compute_plan_text(s: "Setup") -> str:
-    """One-line forward-looking plan for a FIRED setup. Lists the action
-    (long/short now), entry, T1 target, stop, R:R, and the CC citation."""
+    """Wave 20 — Forward-looking conditional plan for a fired setup.
+    Phrased as 'IF condition holds, ride to target. ABORT if breaks stop.'
+    Never says 'do this RIGHT NOW' — Aaron's spec: every plan is contingent
+    on a price-trigger condition, not on this instant."""
     if s is None:
         return ""
     arrow = "🎯"
-    verb = "Long" if s.direction == "long" else "Short"
+    verb_long = s.direction == "long"
+    verb = "long" if verb_long else "short"
+    # Hold-side wording differs by direction.
+    holds_phrase = ("holds above" if verb_long else "holds below")
+    abort_phrase = ("breaks below" if verb_long else "breaks above")
     t1 = s.targets[0] if s.targets else s.entry
     rr = s.risk_reward
     move = s.move_pct
-    return (f'{arrow} <b>{verb} now</b> @ ${s.entry:.2f} → '
+    return (f'{arrow} <b>IF {holds_phrase} ${s.entry:.2f}</b> → ride <b>{verb}</b> to '
             f'<span style="color:#22c55e">${t1:.2f}</span> ({rr:.1f}R, {move:+.1f}%). '
-            f'Stop <span style="color:#ef4444">${s.stop_loss:.2f}</span>. '
+            f'<b>ABORT</b> if {abort_phrase} '
+            f'<span style="color:#ef4444">${s.stop_loss:.2f}</span>. '
             f'<i style="color:#94a3b8">📖 {s.citation}</i>')
 
 
@@ -4040,8 +4047,7 @@ def render_html(
           <tr class="setup-row row-{verdict.lower().replace(' ', '-')} dir-{s.direction}"
               data-symbol="{s.symbol}" data-verdict="{verdict.lower().replace(' ', '-')}" data-direction="{s.direction}">
             <td class="actions">
-              <button class="star-btn" data-symbol="{s.symbol}" onclick="toggleStar(event,'{s.symbol}')">☆</button>
-              <button class="bell-btn" data-symbol="{s.symbol}" data-price="{s.current_price:.2f}" onclick="setAlarm(event,'{s.symbol}',{s.current_price:.2f})">🔔</button>
+              <button class="bell-btn" data-symbol="{s.symbol}" data-price="{s.current_price:.2f}" onclick="setAlarm(event,'{s.symbol}',{s.current_price:.2f})" title="Price alarm">🔔</button>
             </td>
             <td><span class="verdict-pill" style="background:{vcolor};color:#000">{verdict}</span></td>
             <td><b><a class="sym-link" href="/chart?symbol={s.symbol}" target="_blank" rel="noopener" title="Open full chart in new tab">{s.symbol}</a></b></td>
@@ -4070,8 +4076,7 @@ def render_html(
           <tr class="setup-row row-watch dir-{w.direction}"
               data-symbol="{w.symbol}" data-verdict="watch" data-direction="{w.direction}">
             <td class="actions">
-              <button class="star-btn" data-symbol="{w.symbol}" onclick="toggleStar(event,'{w.symbol}')">☆</button>
-              <button class="bell-btn" data-symbol="{w.symbol}" data-price="{w.current_price:.2f}" onclick="setAlarm(event,'{w.symbol}',{w.current_price:.2f})">🔔</button>
+              <button class="bell-btn" data-symbol="{w.symbol}" data-price="{w.current_price:.2f}" onclick="setAlarm(event,'{w.symbol}',{w.current_price:.2f})" title="Alarm me when this triggers">🔔</button>
             </td>
             <td><span class="verdict-pill" style="background:{w_verdict_color};color:#000">{w_verdict_label}</span></td>
             <td><b><a class="sym-link" href="/chart?symbol={w.symbol}" target="_blank" rel="noopener" title="Open full chart in new tab">{w.symbol}</a></b></td>
@@ -4405,8 +4410,7 @@ def render_html(
         monitor_rows.append(f"""
           <tr class="monitor-row" data-symbol="{sym}" style="display:none">
             <td class="actions">
-              <button class="star-btn" data-symbol="{sym}" onclick="toggleStar(event,'{sym}')">☆</button>
-              <button class="bell-btn" data-symbol="{sym}" data-price="{px:.2f}" onclick="setAlarm(event,'{sym}',{px:.2f})">🔔</button>
+              <button class="bell-btn" data-symbol="{sym}" data-price="{px:.2f}" onclick="setAlarm(event,'{sym}',{px:.2f})" title="Price alarm">🔔</button>
             </td>
             <td><b>{sym}</b></td>
             <td style="text-align:right">${px:.2f}</td>
@@ -4478,10 +4482,9 @@ def render_html(
         watching_blocks.append(
             f'<div class="watching-card" data-symbol="{sym}">'
             f'<div class="wc-head">'
-            f'<button class="star-btn" data-symbol="{sym}" onclick="toggleStar(event,\'{sym}\')">☆</button> '
             f'<b>{sym}</b> <span class="watch-price">${px:.2f}</span>'
             f'<button class="bell-btn" data-symbol="{sym}" data-price="{px:.2f}" '
-            f'onclick="setAlarm(event,\'{sym}\',{px:.2f})">🔔</button>'
+            f'onclick="setAlarm(event,\'{sym}\',{px:.2f})" title="Price alarm">🔔</button>'
             f'</div>'
             f'<div class="watch-list">{items_html}</div>'
             f'{kl}'
@@ -4522,9 +4525,7 @@ def render_html(
               <span>📊 {snap.symbol} · CC context</span>
               <span class="snap-actions">
                 <a href="/chart?symbol={snap.symbol}" target="_blank" class="open-chart-btn" title="Open full chart in new tab">📊 Open Chart →</a>
-                <button class="star-btn" data-symbol="{snap.symbol}" onclick="toggleStar(event,'{snap.symbol}')" title="Add to My Watchlist">☆</button>
                 <button class="bell-btn" data-symbol="{snap.symbol}" data-price="{snap.current_price:.2f}" onclick="setAlarm(event,'{snap.symbol}',{snap.current_price:.2f})" title="Set price alarm">🔔</button>
-                <button class="add-list-btn" onclick="addToMyListBySymbol(event,'{snap.symbol}')" title="Add to My Watchlist">+ List</button>
                 <button class="add-list-btn" onclick="openManualSetupModal('{snap.symbol}',{snap.current_price:.2f})" title="Add manual setup for this ticker">✎ Setup</button>
               </span>
             </div>
@@ -4810,20 +4811,16 @@ def render_html(
       <a href="/" class="reset-link">↩ Default watchlist</a>
     </form>
 
-    <div class="mylist-bar">
-      <b>⭐ My Watchlist:</b>
-      <span id="mylist-chips" class="mylist-chips"></span>
-      <span id="mylist-empty" style="color:#64748b">empty — star any ticker (☆) to add, or click +Add</span>
-      <button class="ml-btn" onclick="addToMyList()">+ Add ticker</button>
-      <button class="ml-btn" id="scan-my-list" onclick="scanMyList()" style="display:none">🎯 Scan my list now</button>
-      <button class="ml-btn danger" id="clear-my-list" onclick="clearMyList()" style="display:none">Clear all</button>
-    </div>
+    <!-- Wave 20 — Removed the redundant 'My Watchlist' bar.
+         There's now ONE list: the default universe (CC_2026) + whatever
+         tickers you typed into 'Add & Scan'. Persistence is invisible to
+         the operator (stored server-side in watchlist_persisted.json). -->
 
     <div class="filter-bar">
       <button class="filter-btn active" data-filter="all">All</button>
-      <button class="filter-btn" data-filter="starred">⭐ My list</button>
       <button class="filter-btn" data-filter="strong-take">🟢 STRONG TAKE</button>
       <button class="filter-btn" data-filter="take">🟢 TAKE</button>
+      <button class="filter-btn" data-filter="watch">👁 WATCH</button>
       <button class="filter-btn" data-filter="long">▲ Long</button>
       <button class="filter-btn" data-filter="short">▼ Short</button>
     </div>
@@ -4847,7 +4844,7 @@ def render_html(
 
   <table>
     <thead><tr>
-      <th>⭐🔔</th>
+      <th>🔔</th>
       <th>Verdict</th>
       <th>Symbol</th><th>Chart</th><th>Setup</th>
       <th style="text-align:right">Price</th>
@@ -5193,28 +5190,11 @@ def render_html(
       }}
     }}
 
-    // --- Custom watchlist (= the user's stars) ----------------------------
-    function renderMyListBar() {{
-      const stars = getStars();
-      const chips = document.getElementById('mylist-chips');
-      const empty = document.getElementById('mylist-empty');
-      const scanBtn = document.getElementById('scan-my-list');
-      const clearBtn = document.getElementById('clear-my-list');
-      if (!chips) return;
-      if (stars.length === 0) {{
-        chips.innerHTML = '';
-        if (empty) empty.style.display = '';
-        if (scanBtn) scanBtn.style.display = 'none';
-        if (clearBtn) clearBtn.style.display = 'none';
-      }} else {{
-        chips.innerHTML = stars.map(s =>
-          `<span class="mylist-chip">${{s}} <span class="x" onclick="removeFromMyList('${{s}}')">✕</span></span>`
-        ).join('');
-        if (empty) empty.style.display = 'none';
-        if (scanBtn) scanBtn.style.display = '';
-        if (clearBtn) clearBtn.style.display = '';
-      }}
-    }}
+    // Wave 20 — The My Watchlist UI was removed. getStars() / saveStars()
+    // are kept as private helpers used by the 'Add & Scan' search bar to
+    // mirror what was typed into localStorage (so the page-load sync to
+    // /api/watchlist still works). No DOM element to render anymore.
+    function renderMyListBar() {{ /* no-op since Wave 20 */ }}
     // Wave 15 — Sync localStorage watchlist → backend so the scanner loop
     // analyzes these tickers automatically (full 38 detectors + Key Levels
     // + Fib + Camarilla + Equity + AI commentary).
@@ -5279,46 +5259,14 @@ def render_html(
       return false;
     }}
 
-    function addToMyList() {{
-      const raw = prompt("Add ticker(s) to your watchlist:\\n(comma-separated, e.g.  AAPL, MSFT, BTC-USD, bitcoin, apple)\\n\\nThey'll be analyzed automatically (38 detectors + Key Levels + Fib + AI).");
-      if (!raw) return;
-      const stars = getStars();
-      const added = [];
-      raw.split(',').map(x => x.trim()).filter(Boolean).forEach(t => {{
-        const sym = t.toUpperCase();
-        if (sym && !stars.includes(sym)) {{ stars.push(sym); added.push(sym); }}
-      }});
-      saveStars(stars);
-      applyStarUI();
-      renderMyListBar();
-      renderMonitorTable();
-      // Wave 15: persist + immediate analysis for each new ticker
-      syncWatchlistToBackend();
-      added.forEach(function(s) {{ triggerImmediateScan(s); }});
-      if (added.length) showToast('⚡ Scanning ' + added.join(', ') + ' — full CC analysis…');
-    }}
-    function removeFromMyList(sym) {{
-      saveStars(getStars().filter(s => s !== sym));
-      applyStarUI();
-      renderMyListBar();
-      applyFilter();
-      renderMonitorTable();
-      syncWatchlistToBackend();
-    }}
-    function clearMyList() {{
-      if (!confirm('Remove ALL tickers from your watchlist?')) return;
-      saveStars([]);
-      applyStarUI();
-      renderMyListBar();
-      applyFilter();
-      renderMonitorTable();
-      syncWatchlistToBackend();
-    }}
-    function scanMyList() {{
-      const stars = getStars();
-      if (!stars.length) return;
-      window.location.href = '/?symbols=' + encodeURIComponent(stars.join(','));
-    }}
+    // Wave 20 — These watchlist functions are kept as no-ops for backwards
+    // compatibility (in case any inline-onclick attributes elsewhere call
+    // them). The real entry point is now handleScanSubmit() on the search
+    // form. Operator-level concept: 'one scan universe, one list'.
+    function addToMyList() {{ /* no-op since Wave 20 — use search bar instead */ }}
+    function removeFromMyList(sym) {{ /* no-op since Wave 20 */ }}
+    function clearMyList() {{ /* no-op since Wave 20 */ }}
+    function scanMyList() {{ /* no-op since Wave 20 */ }}
 
     function setAlarm(ev, sym, currentPrice) {{
       ev.stopPropagation();
@@ -5360,15 +5308,13 @@ def render_html(
 
     let currentFilter = 'all';
     function applyFilter() {{
-      const stars = new Set(getStars());
       document.querySelectorAll('.setup-row').forEach(tr => {{
-        const sym = tr.dataset.symbol;
         const verdict = tr.dataset.verdict;
         const dir = tr.dataset.direction;
         let show = true;
-        if (currentFilter === 'starred')      show = stars.has(sym);
-        else if (currentFilter === 'strong-take') show = verdict === 'strong-take';
+        if (currentFilter === 'strong-take')      show = verdict === 'strong-take';
         else if (currentFilter === 'take')        show = verdict === 'take' || verdict === 'strong-take';
+        else if (currentFilter === 'watch')       show = verdict === 'watch' || verdict === 'strong-take' || verdict === 'take';
         else if (currentFilter === 'long')        show = dir === 'long';
         else if (currentFilter === 'short')       show = dir === 'short';
         tr.style.display = show ? '' : 'none';

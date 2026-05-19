@@ -201,7 +201,7 @@ check("Lightweight Charts price lines still drawn",
 # Wave 12: these features live on the MAIN page, not on /chart
 check("Trade Journal panel still on main page",  'id="journal-panel"' in html_main)
 check("Manual setup section still on main page", 'id="manual-section"' in html_main)
-check("My Watchlist bar still on main page",     'class="mylist-bar"' in html_main)
+check("My Watchlist bar removed in Wave 20",     'class="mylist-bar"' not in html_main)
 
 
 # ---------------------------------------------------------------------------

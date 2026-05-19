@@ -76,8 +76,8 @@ check("Wave 15 syncWatchlistToBackend still defined",
       "function syncWatchlistToBackend()" in html_main)
 check("Wave 15 triggerImmediateScan still defined",
       "function triggerImmediateScan(" in html_main)
-check("Wave 15 addToMyList prompt unchanged",
-      "analyzed automatically" in html_main)
+check("Wave 20 addToMyList prompt removed (function is now a no-op)",
+      "function addToMyList()" in html_main)
 check("/api/scan-now endpoint reference unchanged",
       "/api/scan-now?symbol=" in html_main)
 check("/api/watchlist POST endpoint reference unchanged",

@@ -220,8 +220,12 @@ check("S/R classification still correct (regression)",
       cc.support_resistance(df.tail(50), n=3, tol_pct=2.0).get("support") is not None)
 check("TICKER_ALIASES still loaded",     "BITCOIN" in cc.TICKER_ALIASES)
 check("resolve_ticker still maps names", cc.resolve_ticker("bitcoin") == "BTC-USD")
-# Watchlist UI is on the MAIN page (html_main from earlier)
-check("My Watchlist UI is still on main page", 'class="mylist-bar"' in html_main)
+# Wave 20 — The dedicated My Watchlist bar was removed. The 'Add & Scan'
+# search bar IS the watchlist now (one unified list).
+check("My Watchlist bar removed in Wave 20 (search bar handles it)",
+      'class="mylist-bar"' not in html_main)
+check("Add & Scan search bar present (one unified list)",
+      'Add & Scan' in html_main or 'Add &amp; Scan' in html_main)
 # Key Levels panel — appears on BOTH main snapshot cards AND chart page side panel
 check("Key Levels panel still in HTML (chart page)",   '📐 Key Levels' in html)
 
