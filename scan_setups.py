@@ -3489,12 +3489,68 @@ def _compute_verdict(s: "Setup") -> tuple[str, str, str]:
     htf_bad = any(f.label == "HTF" and f.status == "bad" for f in s.context_flags)
 
     if bad or s.risk_reward < 1.0 or htf_bad:
-        return ("AVOID", "#ef4444", 4)
+        return ("AVOID", "#ef4444", 5)
     if s.conviction >= 0.75 and s.risk_reward >= 2.0 and len(warn) == 0:
         return ("STRONG TAKE", "#22c55e", 1)
     if s.conviction >= 0.65 and s.risk_reward >= 1.5 and len(warn) <= 1:
         return ("TAKE", "#86efac", 2)
-    return ("MARGINAL", "#f59e0b", 3)
+    # Rank 3 reserved for 👁 WATCH (forming setups), see _watch_verdict()
+    return ("MARGINAL", "#f59e0b", 4)
+
+
+# ---------------------------------------------------------------------------
+# Wave 18 — Forward-looking PLAN text.
+#
+# Every row in the main table gets a one-line "if-then" plan that references
+# THE SPECIFIC CC concept the setup hinges on. For fired setups it reads:
+#   "🎯 Long now @ $X → $T1 (R:R 2.1R). Stop $S. Cite: First 18.pdf p.67."
+# For forming watches it reads:
+#   "⏳ Wait for $X (EMA 55 pullback). Then long → ~$T, stop $S. Distance:
+#    -2.5% (~3 days). Cite: First 18.pdf p.67."
+#
+# The "cite" comes straight from the detector's `citation` field, which we
+# already populate from CC material (First 18.pdf, Second 18.pdf page refs).
+# No silent shortcuts: if no CC concept maps to the level, we say so.
+# ---------------------------------------------------------------------------
+def _compute_plan_text(s: "Setup") -> str:
+    """One-line forward-looking plan for a FIRED setup. Lists the action
+    (long/short now), entry, T1 target, stop, R:R, and the CC citation."""
+    if s is None:
+        return ""
+    arrow = "🎯"
+    verb = "Long" if s.direction == "long" else "Short"
+    t1 = s.targets[0] if s.targets else s.entry
+    rr = s.risk_reward
+    move = s.move_pct
+    return (f'{arrow} <b>{verb} now</b> @ ${s.entry:.2f} → '
+            f'<span style="color:#22c55e">${t1:.2f}</span> ({rr:.1f}R, {move:+.1f}%). '
+            f'Stop <span style="color:#ef4444">${s.stop_loss:.2f}</span>. '
+            f'<i style="color:#94a3b8">📖 {s.citation}</i>')
+
+
+def _compute_watch_plan_text(w: "WatchItem") -> str:
+    """One-line forward-looking plan for a FORMING watch — describes the
+    trigger level + CC concept + expected distance + days estimate.
+    Caller decides which `verdict` (👁 WATCH) accompanies this row."""
+    if w is None:
+        return ""
+    verb = "long" if w.direction == "long" else "short"
+    # Distance always shown as signed % so the operator knows direction
+    dist = w.distance_pct
+    bars = max(1, int(w.bars_estimate or 1))
+    days_str = f"~{bars} day{'s' if bars != 1 else ''}"
+    return (f'⏳ <b>Wait for ${w.level:.2f}</b> ({w.signal}). '
+            f'Then <b>{verb}</b> on confirmation, stop just past the level. '
+            f'Distance: <span style="color:#fbbf24">{dist:+.1f}%</span> '
+            f'({days_str}). '
+            f'<i style="color:#94a3b8">📖 {w.citation}</i>')
+
+
+def _watch_verdict() -> tuple[str, str, int]:
+    """Verdict tuple used for forming-watch rows. Ranked between TAKE and
+    MARGINAL — a close-to-firing setup is often more actionable than a
+    weak fired one."""
+    return ("👁 WATCH", "#a78bfa", 3)
 
 
 def _render_flags(flags: list[ContextFlag]) -> str:
@@ -3934,7 +3990,7 @@ def render_html(
         v = _compute_verdict(s)[0]
         verdict_counts[v] = verdict_counts.get(v, 0) + 1
 
-    # --- Summary table
+    # --- Summary table (Wave 18: PLAN column + forming-watch rows merged in)
     rows = []
     for i, s in enumerate(setups_sorted):
         verdict, vcolor, _ = _compute_verdict(s)
@@ -3942,6 +3998,7 @@ def render_html(
         tone = "#22c55e" if long else "#ef4444"
         arrow = "▲" if long else "▼"
         targets_html = " · ".join(f"${t:.2f}" for t in s.targets)
+        plan_html = _compute_plan_text(s)
         rows.append(f"""
           <tr class="setup-row row-{verdict.lower().replace(' ', '-')} dir-{s.direction}"
               data-symbol="{s.symbol}" data-verdict="{verdict.lower().replace(' ', '-')}" data-direction="{s.direction}">
@@ -3959,9 +4016,40 @@ def render_html(
             <td style="text-align:right;color:#22c55e">{targets_html}</td>
             <td style="text-align:right">{s.risk_reward:.2f}R<br><span style="color:#94a3b8">{s.move_pct:+.1f}%</span></td>
             <td style="text-align:right">{int(s.conviction*100)}%</td>
-            <td style="font-size:11px;color:#94a3b8">{s.reasoning}<br><i>{s.citation}</i></td>
+            <td style="font-size:11px;color:#cbd5e1;line-height:1.45">{plan_html}</td>
           </tr>
         """)
+
+    # Wave 18 — Forming watches as additional rows (sorted by abs distance).
+    # These appear BETWEEN fired and AVOID rows (verdict rank 3) so the
+    # operator sees "next to fire" right next to "fired now".
+    w_verdict_label, w_verdict_color, _ = _watch_verdict()
+    watches_sorted = sorted(watches or [], key=lambda w: abs(w.distance_pct))
+    for w in watches_sorted[:8]:  # cap so the table doesn't explode
+        dir_arrow = "▲" if w.direction == "long" else "▼"
+        dir_color = "#22c55e" if w.direction == "long" else "#ef4444"
+        w_plan = _compute_watch_plan_text(w)
+        rows.append(f"""
+          <tr class="setup-row row-watch dir-{w.direction}"
+              data-symbol="{w.symbol}" data-verdict="watch" data-direction="{w.direction}">
+            <td class="actions">
+              <button class="star-btn" data-symbol="{w.symbol}" onclick="toggleStar(event,'{w.symbol}')">☆</button>
+              <button class="bell-btn" data-symbol="{w.symbol}" data-price="{w.current_price:.2f}" onclick="setAlarm(event,'{w.symbol}',{w.current_price:.2f})">🔔</button>
+            </td>
+            <td><span class="verdict-pill" style="background:{w_verdict_color};color:#000">{w_verdict_label}</span></td>
+            <td><b><a class="sym-link" href="/chart?symbol={w.symbol}" target="_blank" rel="noopener" title="Open full chart in new tab">{w.symbol}</a></b></td>
+            <td><a class="open-chart-mini" href="/chart?symbol={w.symbol}" target="_blank" rel="noopener" title="Open full chart in new tab">📊 Open</a></td>
+            <td style="color:{dir_color}">{dir_arrow} {w.signal}</td>
+            <td style="text-align:right">${w.current_price:.2f}</td>
+            <td style="text-align:right;color:#fbbf24">${w.level:.2f}</td>
+            <td style="text-align:right;color:#64748b">—</td>
+            <td style="text-align:right;color:#64748b">—</td>
+            <td style="text-align:right;color:#fbbf24">{w.distance_pct:+.1f}%</td>
+            <td style="text-align:right;color:#64748b">—</td>
+            <td style="font-size:11px;color:#cbd5e1;line-height:1.45">{w_plan}</td>
+          </tr>
+        """)
+
     table_rows = "\n".join(rows) if rows else "<tr><td colspan=12 style='text-align:center;padding:24px;color:#94a3b8'>No setups firing right now — try again later or add more tickers.</td></tr>"
 
     # Price map exposed to client-side JS for alarm checking
@@ -3970,8 +4058,13 @@ def render_html(
 
     # Verdict summary chips above table
     legend_html = ""
-    for label, color in [("STRONG TAKE", "#22c55e"), ("TAKE", "#86efac"), ("MARGINAL", "#f59e0b"), ("AVOID", "#ef4444")]:
-        n = verdict_counts.get(label, 0)
+    watch_count = len(watches_sorted[:8])
+    for label, color in [
+        ("STRONG TAKE", "#22c55e"), ("TAKE", "#86efac"),
+        ("👁 WATCH",    "#a78bfa"),  # Wave 18 — forming setups
+        ("MARGINAL",    "#f59e0b"), ("AVOID", "#ef4444"),
+    ]:
+        n = watch_count if label == "👁 WATCH" else verdict_counts.get(label, 0)
         legend_html += f'<span class="legend-pill" style="background:{color};color:#000">{label} · {n}</span>'
 
     # Regime + macro banner — top-of-page risk-context strip
@@ -4726,7 +4819,7 @@ def render_html(
       <th style="text-align:right">Targets</th>
       <th style="text-align:right">R:R / Move</th>
       <th style="text-align:right">Conv</th>
-      <th>Rationale (CC citation)</th>
+      <th>Plan + CC citation</th>
     </tr></thead>
     <tbody>{table_rows}</tbody>
   </table>
