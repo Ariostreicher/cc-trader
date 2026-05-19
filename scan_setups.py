@@ -7734,9 +7734,10 @@ def render_single_chart_html(
         + '<div class="lg-row"><span class="lg-dot" style="background:#64748b"></span> EMA 200</div>'
         + '<div class="lg-row"><span class="lg-px">' + sym + '</span></div>';
       }}
-      // Wave 14 hotfix — show ONLY the most recent N bars on initial load
-      // (default TF is 1D, so ~120 bars = ~6 months). Without this, charts
-      // could open zoomed-out to 4+ years which buries the recent action.
+      // Wave 14 hotfix + Wave 21 timing fix — show ONLY the most recent
+      // N bars on initial load (default TF is 1D, so ~120 bars = ~6 mo).
+      // Deferred two frames so LWC has fully painted before we zoom (else
+      // setVisibleLogicalRange silently fails and we'd fitContent ~4y).
       (function() {{
         var defaultBars = {{
           '1m': 60,  '3m': 60,  '5m': 78,  '15m': 52, '30m': 52, '45m': 40,
@@ -7745,15 +7746,20 @@ def render_single_chart_html(
           '3M': 40,  '6M': 20,  '12M': 15, 'ALL': 240,
         }}[defaultTf] || 120;
         var n = initial.candles ? initial.candles.length : 0;
-        if (n > defaultBars) {{
+        function doZoom() {{
           try {{
-            chart.timeScale().setVisibleLogicalRange({{ from: n - defaultBars, to: n - 1 }});
+            if (n > defaultBars) {{
+              chart.timeScale().setVisibleLogicalRange({{ from: n - defaultBars, to: n - 1 }});
+              console.log('[CC] init zoom: tf=' + defaultTf + ', last ' + defaultBars + ' of ' + n);
+            }} else {{
+              chart.timeScale().fitContent();
+            }}
           }} catch (e) {{
-            chart.timeScale().fitContent();
+            console.warn('[CC] init zoom failed:', e);
+            try {{ chart.timeScale().fitContent(); }} catch(_) {{}}
           }}
-        }} else {{
-          chart.timeScale().fitContent();
         }}
+        requestAnimationFrame(function() {{ requestAnimationFrame(doZoom); }});
       }})();
       new ResizeObserver(function() {{ chart.applyOptions({{ width: div.clientWidth, height: div.clientHeight }}); }}).observe(div);
 
@@ -8075,18 +8081,36 @@ def render_single_chart_html(
 
     function _setDefaultVisibleRange(h, tf, dataLen) {{
       var n = DEFAULT_VISIBLE_BARS[tf] || 120;
-      if (dataLen <= n) {{
-        // Less data than the default window — just fit everything.
-        h.chart.timeScale().fitContent();
-        return;
+      // Wave 21 — defer the zoom call so LWC finishes ingesting the new
+      // series data before we ask it to zoom. Without this, 1m can return
+      // 2700 bars and setVisibleLogicalRange silently fails (because the
+      // chart's internal time-scale state hasn't caught up yet), then we
+      // fall through to fitContent which displays ALL 2700 bars squashed
+      // — looks like daily candles. requestAnimationFrame fires AFTER
+      // LWC's next paint, which is after the setData completes.
+      function doZoom() {{
+        try {{
+          if (dataLen <= n) {{
+            h.chart.timeScale().fitContent();
+            console.log('[CC] zoom: tf=' + tf + ', fitContent (dataLen=' + dataLen + ' ≤ ' + n + ')');
+            return;
+          }}
+          var from = dataLen - n;
+          var to   = dataLen - 1;
+          h.chart.timeScale().setVisibleLogicalRange({{ from: from, to: to }});
+          console.log('[CC] zoom: tf=' + tf + ', visible bars=' + from + '..' + to + ' (' + n + ' of ' + dataLen + ')');
+        }} catch (e) {{
+          console.warn('[CC] zoom failed, fitContent fallback:', e);
+          try {{ h.chart.timeScale().fitContent(); }} catch(_) {{}}
+        }}
       }}
-      try {{
-        h.chart.timeScale().setVisibleLogicalRange({{
-          from: dataLen - n, to: dataLen - 1
-        }});
-      }} catch (e) {{
-        h.chart.timeScale().fitContent();
-      }}
+      // Two-frame defer to be safe: first frame for LWC to paint, second
+      // for the time-scale to settle. Empirically this fixes the 1m-shows-
+      // daily bug because setVisibleLogicalRange wasn't taking effect on
+      // the same tick as setData.
+      requestAnimationFrame(function() {{
+        requestAnimationFrame(doZoom);
+      }});
     }}
 
     function _applyTfData(h, tf, tfData) {{
@@ -8147,7 +8171,9 @@ def render_single_chart_html(
       }}
       if (btn) btn.classList.add('tf-loading');
 
-      var url = '/chart-tf?symbol=' + encodeURIComponent(sym) + '&tf=' + encodeURIComponent(tf);
+      // Wave 21 — cache-buster timestamp so the browser never serves a
+      // stale response that might have been cached pre-fix.
+      var url = '/chart-tf?symbol=' + encodeURIComponent(sym) + '&tf=' + encodeURIComponent(tf) + '&t=' + Date.now();
       console.log('[CC] TF switch — fetching', url);
       fetch(url).then(function(r) {{ return r.json(); }}).then(function(j) {{
         var n = (j && j.candles) ? j.candles.length : 0;
@@ -8671,7 +8697,9 @@ def serve_live(tickers: list[str], port: int, refresh_seconds: int, cache_second
                                "candles": [], "volume": []}
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Cache-Control", "public, max-age=60")
+                # Wave 21 — no caching so the browser always gets fresh
+                # bars from yfinance on every TF click.
+                self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(_json.dumps(payload, default=float).encode())
             elif parsed.path == "/chart-allhist":
