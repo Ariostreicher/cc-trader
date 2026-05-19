@@ -7136,6 +7136,10 @@ def render_single_chart_html(
   .anno-btn {{ padding:5px 10px; background:#0a0f1c; color:#94a3b8; border:1px solid #1e293b; border-radius:4px; font-size:11px; cursor:pointer; font-family:ui-monospace,monospace; }}
   .anno-btn:hover {{ background:#1e293b; color:#fbbf24; border-color:#fbbf24; }}
   .countdown-badge {{ padding:4px 10px; background:#1e1b4b; color:#a78bfa; border-radius:4px; font-size:11px; font-family:ui-monospace,monospace; font-weight:600; }}
+  /* Wave 16 — chart-style selector (12 TradingView-parity styles) */
+  .chart-style-select {{ padding:5px 10px; background:#0a0f1c; color:#fbbf24; border:1px solid #1e293b; border-radius:4px; font-size:11px; cursor:pointer; font-family:ui-monospace,monospace; font-weight:600; appearance:menulist; }}
+  .chart-style-select:hover {{ background:#1e293b; border-color:#fbbf24; }}
+  .chart-style-select option {{ background:#0a0f1c; color:#e2e8f0; }}
   .tv-widget-host {{ height:680px; width:100%; }}
   .tv-widget-host > div {{ height:680px !important; width:100% !important; }}
   .tv-widget-host iframe {{ height:680px !important; width:100% !important; border:0 !important; border-radius:6px; }}
@@ -7268,6 +7272,20 @@ def render_single_chart_html(
           </div>
           <div class="chart-extras">
             <span class="countdown-badge" id="cd_chart_solo">⏱ —</span>
+            <select class="chart-style-select" id="chart-style-select" onchange="setChartStyle(this.value)" title="Chart style">
+              <option value="candles">📊 Candles</option>
+              <option value="hollow_candles">⬚ Hollow candles</option>
+              <option value="volume_candles">🎨 Volume candles</option>
+              <option value="line">📈 Line</option>
+              <option value="line_markers">⦿ Line w/ markers</option>
+              <option value="step_line">⛟ Step line</option>
+              <option value="area">⛰ Area</option>
+              <option value="hlc_area">🟦 HLC area</option>
+              <option value="baseline">⥯ Baseline</option>
+              <option value="columns">▮ Columns</option>
+              <option value="high_low">⫼ High-low</option>
+              <option value="heikin_ashi">🕯 Heikin Ashi</option>
+            </select>
             <button class="anno-btn" onclick="addAnnotation('{symbol}','chart_solo','note')">✏ Note</button>
             <button class="anno-btn" onclick="addAnnotation('{symbol}','chart_solo','line')">+ Line</button>
             <button class="anno-btn" onclick="clearAnnotations('{symbol}','chart_solo')">⌫ Clear my drawings</button>
@@ -7563,12 +7581,14 @@ def render_single_chart_html(
         timeScale: {{ borderColor: '#1e293b', timeVisible: (defaultTf === '1H') }},
         crosshair: {{ mode: 1 }}, autoSize: true,
       }});
-      var candleSeries = chart.addCandlestickSeries({{
-        upColor:'#22c55e', downColor:'#ef4444',
-        borderUpColor:'#22c55e', borderDownColor:'#ef4444',
-        wickUpColor:'#22c55e', wickDownColor:'#ef4444',
-      }});
-      candleSeries.setData(initial.candles);
+      // Wave 16 — Build the main series per the persisted chart style (default
+      // = candles). The style selector swaps this series at runtime.
+      var initialStyle = getChartStyle();
+      var styleSel = document.getElementById('chart-style-select');
+      if (styleSel) styleSel.value = initialStyle;
+      var built = _buildMainSeries(chart, initialStyle, initial.candles || [], initial.volume || []);
+      var candleSeries = built.main;
+      var auxSeries = built.aux;
       var volSeries = chart.addHistogramSeries({{
         priceFormat: {{ type:'volume' }}, priceScaleId: '', color:'#22c55e55',
       }});
@@ -7590,13 +7610,7 @@ def render_single_chart_html(
       var rawLines = div.getAttribute('data-lines') || '[]';
       var lines;
       try {{ lines = JSON.parse(rawLines); }} catch(_) {{ lines = []; }}
-      lines.forEach(function(l) {{
-        candleSeries.createPriceLine({{
-          price: l.price, color: l.color, lineWidth: l.lineWidth || 2,
-          lineStyle: l.lineStyle === 2 ? LightweightCharts.LineStyle.Dashed : LightweightCharts.LineStyle.Solid,
-          axisLabelVisible: true, title: l.title || '',
-        }});
-      }});
+      _reapplyPriceLines(candleSeries, lines);
       var legend = document.getElementById('lg_chart_solo');
       if (legend) {{
         legend.innerHTML =
@@ -7706,6 +7720,9 @@ def render_single_chart_html(
       window.cc_chart_handles['lwc_chart_solo'] = {{
         chart: chart, candleSeries: candleSeries, volSeries: volSeries,
         emaSeries: emaSeries, currentTf: defaultTf, rawData: rawData,
+        // Wave 16 — chart-style state
+        currentStyle: initialStyle, auxSeries: auxSeries,
+        _priceLines: lines, _lastTfData: initial,
       }};
 
       // Wave 14 — TF buttons cover ALL 17 intervals. The page is BAKED with
@@ -7743,6 +7760,176 @@ def render_single_chart_html(
 
     // Wave 14 — Intraday TF set (must render with timeVisible=true).
     var INTRADAY_TFS = ['1m','3m','5m','15m','30m','45m','1h','2h','3h','4h'];
+
+    // Wave 16 — Chart-style selector (12 TradingView-parity styles).
+    // Stored in localStorage so the operator's preference persists across
+    // page loads + chart navigation.
+    function getChartStyle() {{
+      try {{ return localStorage.getItem('cc_chart_style') || 'candles'; }}
+      catch(_) {{ return 'candles'; }}
+    }}
+    function saveChartStyle(s) {{
+      try {{ localStorage.setItem('cc_chart_style', s); }} catch(_) {{}}
+    }}
+
+    // Compute Heikin Ashi candles from regular OHLC.
+    // HA formula:
+    //   HA_Close[i] = (O+H+L+C) / 4
+    //   HA_Open[i]  = (HA_Open[i-1] + HA_Close[i-1]) / 2
+    //   HA_High[i]  = max(H, HA_Open, HA_Close)
+    //   HA_Low[i]   = min(L, HA_Open, HA_Close)
+    function _heikinAshi(candles) {{
+      if (!candles || !candles.length) return [];
+      var out = [];
+      var prevOpen = candles[0].open, prevClose = candles[0].close;
+      for (var i = 0; i < candles.length; i++) {{
+        var c = candles[i];
+        var haClose = (c.open + c.high + c.low + c.close) / 4;
+        var haOpen  = (i === 0) ? (c.open + c.close) / 2 : (prevOpen + prevClose) / 2;
+        var haHigh  = Math.max(c.high, haOpen, haClose);
+        var haLow   = Math.min(c.low,  haOpen, haClose);
+        out.push({{ time: c.time, open: haOpen, high: haHigh, low: haLow, close: haClose }});
+        prevOpen = haOpen; prevClose = haClose;
+      }}
+      return out;
+    }}
+
+    // Build the main series for a given chart style. Returns an object with
+    // - main: the primary series (where we attach price lines + EMAs)
+    // - aux:  extra series array (e.g. HLC area uses 3 line series)
+    // Caller treats aux[] as auxiliary handles to remove on the next swap.
+    function _buildMainSeries(chart, style, candles, volume) {{
+      var LC = LightweightCharts;
+      var closeData = candles.map(function(c) {{ return {{ time: c.time, value: c.close }}; }});
+      var highData  = candles.map(function(c) {{ return {{ time: c.time, value: c.high }}; }});
+      var lowData   = candles.map(function(c) {{ return {{ time: c.time, value: c.low  }}; }});
+      var s, aux = [];
+      switch (style) {{
+        case 'hollow_candles':
+          s = chart.addCandlestickSeries({{
+            upColor: 'rgba(0,0,0,0)', downColor: '#ef4444',
+            borderUpColor: '#22c55e', borderDownColor: '#ef4444',
+            wickUpColor: '#22c55e', wickDownColor: '#ef4444',
+          }});
+          s.setData(candles); break;
+        case 'volume_candles':
+          // Map each bar's volume to opacity (higher volume = more saturated)
+          var maxV = 1; volume.forEach(function(v) {{ if (v.value > maxV) maxV = v.value; }});
+          var coloredCandles = candles.map(function(c, i) {{
+            var v = (volume[i] && volume[i].value) || 0;
+            var op = Math.max(0.25, Math.min(1, v / maxV));
+            var up = c.close >= c.open;
+            return Object.assign({{}}, c, {{ color: up ? 'rgba(34,197,94,' + op + ')' : 'rgba(239,68,68,' + op + ')' }});
+          }});
+          s = chart.addCandlestickSeries({{
+            upColor:'#22c55e', downColor:'#ef4444',
+            borderUpColor:'#22c55e', borderDownColor:'#ef4444',
+            wickUpColor:'#22c55e', wickDownColor:'#ef4444',
+          }});
+          s.setData(coloredCandles); break;
+        case 'line':
+          s = chart.addLineSeries({{ color: '#fbbf24', lineWidth: 2 }});
+          s.setData(closeData); break;
+        case 'line_markers':
+          s = chart.addLineSeries({{ color: '#fbbf24', lineWidth: 2 }});
+          s.setData(closeData);
+          // Mark every 10th bar so the chart doesn't get spammy
+          if (closeData.length > 0) {{
+            var step = Math.max(1, Math.floor(closeData.length / 25));
+            var markers = [];
+            for (var i = step; i < closeData.length; i += step) {{
+              markers.push({{ time: closeData[i].time, position: 'inBar', shape: 'circle', color: '#22c55e', size: 1 }});
+            }}
+            s.setMarkers(markers);
+          }}
+          break;
+        case 'step_line':
+          s = chart.addLineSeries({{ color: '#fbbf24', lineWidth: 2, lineType: LC.LineType ? LC.LineType.WithSteps : 1 }});
+          s.setData(closeData); break;
+        case 'area':
+          s = chart.addAreaSeries({{ topColor: 'rgba(251,191,36,0.35)', bottomColor: 'rgba(251,191,36,0.02)', lineColor: '#fbbf24', lineWidth: 2 }});
+          s.setData(closeData); break;
+        case 'hlc_area':
+          // High line (green tint) + Low line (red tint) + Close area in middle
+          var hi = chart.addLineSeries({{ color: 'rgba(34,197,94,0.6)', lineWidth: 1 }});
+          hi.setData(highData);
+          var lo = chart.addLineSeries({{ color: 'rgba(239,68,68,0.6)', lineWidth: 1 }});
+          lo.setData(lowData);
+          s = chart.addAreaSeries({{ topColor: 'rgba(251,191,36,0.20)', bottomColor: 'rgba(251,191,36,0.02)', lineColor: '#fbbf24', lineWidth: 2 }});
+          s.setData(closeData);
+          aux = [hi, lo];
+          break;
+        case 'baseline':
+          var base = closeData.length ? closeData[0].value : 0;
+          s = chart.addBaselineSeries({{
+            baseValue: {{ type: 'price', price: base }},
+            topLineColor: '#22c55e', topFillColor1: 'rgba(34,197,94,0.28)', topFillColor2: 'rgba(34,197,94,0.04)',
+            bottomLineColor: '#ef4444', bottomFillColor1: 'rgba(239,68,68,0.28)', bottomFillColor2: 'rgba(239,68,68,0.04)',
+            lineWidth: 2,
+          }});
+          s.setData(closeData); break;
+        case 'columns':
+          var colData = candles.map(function(c) {{
+            return {{ time: c.time, value: c.close, color: c.close >= c.open ? '#22c55e' : '#ef4444' }};
+          }});
+          s = chart.addHistogramSeries({{ color: '#fbbf24', priceFormat: {{ type: 'price', precision: 2, minMove: 0.01 }} }});
+          s.setData(colData); break;
+        case 'high_low':
+          // Bar series (OHLC bars) — LWC's bar series.
+          s = chart.addBarSeries({{ upColor: '#22c55e', downColor: '#ef4444', thinBars: false }});
+          s.setData(candles); break;
+        case 'heikin_ashi':
+          var ha = _heikinAshi(candles);
+          s = chart.addCandlestickSeries({{
+            upColor:'#22c55e', downColor:'#ef4444',
+            borderUpColor:'#22c55e', borderDownColor:'#ef4444',
+            wickUpColor:'#22c55e', wickDownColor:'#ef4444',
+          }});
+          s.setData(ha); break;
+        case 'candles':
+        default:
+          s = chart.addCandlestickSeries({{
+            upColor:'#22c55e', downColor:'#ef4444',
+            borderUpColor:'#22c55e', borderDownColor:'#ef4444',
+            wickUpColor:'#22c55e', wickDownColor:'#ef4444',
+          }});
+          s.setData(candles); break;
+      }}
+      return {{ main: s, aux: aux }};
+    }}
+
+    function _reapplyPriceLines(series, lines) {{
+      if (!series || !lines) return;
+      lines.forEach(function(l) {{
+        try {{
+          series.createPriceLine({{
+            price: l.price, color: l.color, lineWidth: l.lineWidth || 2,
+            lineStyle: l.lineStyle === 2 ? LightweightCharts.LineStyle.Dashed : LightweightCharts.LineStyle.Solid,
+            axisLabelVisible: true, title: l.title || '',
+          }});
+        }} catch (e) {{}}
+      }});
+    }}
+
+    function setChartStyle(style) {{
+      var h = window.cc_chart_handles['lwc_chart_solo'];
+      if (!h) return;
+      saveChartStyle(style);
+      h.currentStyle = style;
+      // Re-render with the current TF data (use whatever's already loaded)
+      var data = h._lastTfData;
+      if (!data) return;
+      // Remove the old main + aux series (price lines go with them)
+      try {{ if (h.candleSeries) h.chart.removeSeries(h.candleSeries); }} catch(_) {{}}
+      (h.auxSeries || []).forEach(function(s) {{ try {{ h.chart.removeSeries(s); }} catch(_) {{}} }});
+      // Build new
+      var built = _buildMainSeries(h.chart, style, data.candles, data.volume || []);
+      h.candleSeries = built.main;
+      h.auxSeries = built.aux;
+      _reapplyPriceLines(h.candleSeries, h._priceLines);
+      // Re-apply user annotations (they live on candleSeries)
+      applyAnnotations(document.getElementById('lwc_chart_solo').getAttribute('data-symbol'), 'chart_solo');
+    }}
 
     // Wave 14 (hotfix) — Default visible bars per TF.
     // When you switch to 1m, we DON'T want to show 7 days of 1-minute data
@@ -7792,7 +7979,18 @@ def render_single_chart_html(
 
     function _applyTfData(h, tf, tfData) {{
       if (!tfData || !tfData.candles || !tfData.candles.length) return false;
-      h.candleSeries.setData(tfData.candles);
+      // Wave 16 — Remember the latest data so the chart-style selector can
+      // re-render without re-fetching.
+      h._lastTfData = tfData;
+      var style = h.currentStyle || getChartStyle();
+      // Always rebuild the main series so style + data stay in sync.
+      try {{ if (h.candleSeries) h.chart.removeSeries(h.candleSeries); }} catch(_) {{}}
+      (h.auxSeries || []).forEach(function(s) {{ try {{ h.chart.removeSeries(s); }} catch(_) {{}} }});
+      var built = _buildMainSeries(h.chart, style, tfData.candles, tfData.volume || []);
+      h.candleSeries = built.main;
+      h.auxSeries = built.aux;
+      h.currentStyle = style;
+      _reapplyPriceLines(h.candleSeries, h._priceLines);
       if (h.volSeries && tfData.volume) h.volSeries.setData(tfData.volume);
       ['ema_8','ema_21','ema_55','ema_100','ema_200'].forEach(function(k) {{
         if (h.emaSeries[k]) h.emaSeries[k].setData(tfData[k] || []);
