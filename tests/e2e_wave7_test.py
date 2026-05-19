@@ -157,12 +157,22 @@ page = cc.render_html(
     setups=[setup], scanned=1, duration_s=0.1,
     levels_by_symbol={"NVDA": snap},
 )
-check("setup card contains 'Structured Equity Analysis' panel",
+# Wave 19 — the per-ticker setup card with the equity panel was removed
+# from the main scroll. Equity Analysis now lives at /chart and inside the
+# All-Tickers-Overview collapsible snapshot section.
+# The main page still has snapshots inside the collapsible.
+check("Structured Equity Analysis still surfaces (snapshot section)",
       "Structured Equity Analysis" in page)
-check("composite/conviction band visible on the page",
-      "High Conviction" in page)
-check("bull thesis is rendered on the page",
-      "CUDA" in page)
+# Composite + bull thesis now live on the /chart page
+chart_page = cc.render_single_chart_html(symbol="NVDA", snap=snap,
+    chart_data={"default_tf":"1D","timeframes":{
+        "1D":{"candles":[],"volume":[],"ema_8":[],"ema_21":[],
+              "ema_55":[],"ema_100":[],"ema_200":[]}}},
+    setups=[setup], equity_analysis=FAKE_EQUITY)
+check("composite/conviction band visible on /chart page",
+      "High Conviction" in chart_page)
+check("bull thesis is rendered on /chart page",
+      "CUDA" in chart_page)
 
 
 # ---------------------------------------------------------------------------

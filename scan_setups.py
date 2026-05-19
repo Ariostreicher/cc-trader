@@ -3990,15 +3990,52 @@ def render_html(
         v = _compute_verdict(s)[0]
         verdict_counts[v] = verdict_counts.get(v, 0) + 1
 
-    # --- Summary table (Wave 18: PLAN column + forming-watch rows merged in)
+    # --- Summary table (Wave 18: PLAN column + forming-watch rows;
+    # Wave 19: GROUP BY SYMBOL — if a ticker has 3 setups firing we show
+    # ONE row with the strongest as primary + the other options listed inline
+    # inside the PLAN cell. No more 3 separate rows for the same ticker.)
+    setups_by_symbol: dict[str, list] = {}
+    sym_order: list[str] = []
+    for s in setups_sorted:
+        if s.symbol not in setups_by_symbol:
+            setups_by_symbol[s.symbol] = []
+            sym_order.append(s.symbol)
+        setups_by_symbol[s.symbol].append(s)
+
     rows = []
-    for i, s in enumerate(setups_sorted):
+    for sym in sym_order:
+        ticker_setups = setups_by_symbol[sym]
+        s = ticker_setups[0]  # already sorted: best one first (verdict, conv × R:R)
+        alts = ticker_setups[1:]  # everything else for this ticker
         verdict, vcolor, _ = _compute_verdict(s)
         long = s.direction == "long"
         tone = "#22c55e" if long else "#ef4444"
         arrow = "▲" if long else "▼"
         targets_html = " · ".join(f"${t:.2f}" for t in s.targets)
         plan_html = _compute_plan_text(s)
+        # Wave 19 — additional options inside the same row
+        if alts:
+            alt_lines = []
+            for a in alts:
+                a_verdict, a_color, _ = _compute_verdict(a)
+                alt_lines.append(
+                    f'<div style="margin-top:6px;padding-left:8px;border-left:2px solid {a_color}">'
+                    f'<span style="color:{a_color};font-weight:600;font-size:10px">{a_verdict}</span> · '
+                    f'{("▲" if a.direction == "long" else "▼")} {a.name} · '
+                    f'{_compute_plan_text(a)}'
+                    f'</div>'
+                )
+            plan_html += (
+                f'<details style="margin-top:8px;cursor:pointer">'
+                f'<summary style="color:#a78bfa;font-size:10px;font-weight:700">'
+                f'+ {len(alts)} more option{"s" if len(alts) > 1 else ""} on this ticker</summary>'
+                + "".join(alt_lines)
+                + '</details>'
+            )
+        # Aggregated setup-name cell for the SETUP column when there are alts
+        setup_label = f"{arrow} {s.name}"
+        if alts:
+            setup_label += f' <span style="color:#a78bfa;font-size:10px;font-weight:700">+{len(alts)}</span>'
         rows.append(f"""
           <tr class="setup-row row-{verdict.lower().replace(' ', '-')} dir-{s.direction}"
               data-symbol="{s.symbol}" data-verdict="{verdict.lower().replace(' ', '-')}" data-direction="{s.direction}">
@@ -4009,7 +4046,7 @@ def render_html(
             <td><span class="verdict-pill" style="background:{vcolor};color:#000">{verdict}</span></td>
             <td><b><a class="sym-link" href="/chart?symbol={s.symbol}" target="_blank" rel="noopener" title="Open full chart in new tab">{s.symbol}</a></b></td>
             <td><a class="open-chart-mini" href="/chart?symbol={s.symbol}" target="_blank" rel="noopener" title="Open full chart in new tab">📊 Open</a></td>
-            <td style="color:{tone}">{arrow} {s.name}</td>
+            <td style="color:{tone}">{setup_label}</td>
             <td style="text-align:right">${s.current_price:.2f}</td>
             <td style="text-align:right">${s.entry:.2f}</td>
             <td style="text-align:right;color:#ef4444">${s.stop_loss:.2f}</td>
@@ -4824,7 +4861,9 @@ def render_html(
     <tbody>{table_rows}</tbody>
   </table>
 
-  {charts_html}
+  <!-- Wave 19 — Per-ticker detail cards removed from main page. The table
+       row's PLAN column carries the actionable summary; clicking the chart
+       link in any row opens the FULL CC analysis at /chart?symbol=X. -->
 
   <details class="collapsible-section">
     <summary>📡 Watchlist Monitor <span class="sub" id="monitor-count-summary">(click to expand)</span></summary>
@@ -8163,16 +8202,23 @@ def render_single_chart_html(
       if (btn) btn.classList.add('tf-loading');
 
       var url = '/chart-tf?symbol=' + encodeURIComponent(sym) + '&tf=' + encodeURIComponent(tf);
+      console.log('[CC] TF switch — fetching', url);
       fetch(url).then(function(r) {{ return r.json(); }}).then(function(j) {{
-        if (j && j.candles && j.candles.length) {{
+        var n = (j && j.candles) ? j.candles.length : 0;
+        console.log('[CC] /chart-tf response: tf=' + tf + ', candles=' + n
+                  + ', first_time=' + (n ? j.candles[0].time : 'N/A')
+                  + ', last_time=' + (n ? j.candles[n-1].time : 'N/A'));
+        if (n > 0) {{
           window.cc_tf_cache[tf] = j;
           _applyTfData(h, tf, j);
         }} else {{
-          showToast('⚠ No data for ' + tf + ' — try another TF');
+          showToast('⚠ No data for ' + tf
+            + (tf === '1m' ? ' — yfinance gives 1m only for the last 7 days. If markets are closed or low-liquidity, try 5m or 15m.' : ' — try another TF.'));
           if (btn) btn.classList.remove('active');
         }}
       }}).catch(function(err) {{
-        showToast('⚠ ' + tf + ' fetch failed');
+        console.error('[CC] /chart-tf fetch failed:', err);
+        showToast('⚠ ' + tf + ' fetch failed — check console');
         if (btn) btn.classList.remove('active');
       }}).finally(function() {{
         if (loader) loader.style.display = 'none';

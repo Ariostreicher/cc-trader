@@ -160,13 +160,22 @@ levels_n = {"NVDA": cc.Snapshot(
 )}
 html3 = cc.render_html(setups=[fake_setup], scanned=1, duration_s=0.1,
                       levels_by_symbol=levels_n)
-# The setup card area should contain a Key Levels panel
-check("Key Levels panel renders in setup card", '📐 Key Levels' in html3)
-check("Setup card shows EMA distance to current", '↓' in html3 or '↑' in html3)
-check("Setup card retains entry/stop/targets",
+# Wave 19 — the dedicated per-ticker setup card was removed from the main
+# page. Key Levels now appear (a) inside the All-Tickers-Overview snapshot
+# section and (b) on the /chart?symbol=X page. The main-page table still
+# carries entry/stop/targets in dedicated columns.
+check("Main-page table still has entry/stop/targets",
       '$500.00' in html3 and '$490.00' in html3 and '$520.00' in html3)
-check("Senior Trader offline placeholder appears (no API key)",
-      'OPENAI_API_KEY' in html3)
+# Key Levels + Senior Trader placeholder now live at /chart
+chart_page = cc.render_single_chart_html(symbol="NVDA",
+    snap=levels_n["NVDA"], chart_data={"default_tf":"1D","timeframes":{
+        "1D":{"candles":[],"volume":[],"ema_8":[],"ema_21":[],
+              "ema_55":[],"ema_100":[],"ema_200":[]}}},
+    setups=[fake_setup])
+check("Key Levels panel still renders on /chart page", '📐 Key Levels' in chart_page)
+check("/chart page shows EMA distance to current", '↓' in chart_page or '↑' in chart_page)
+check("Senior Trader offline placeholder on /chart (no API key)",
+      'OPENAI_API_KEY' in chart_page)
 
 
 # ---------------------------------------------------------------------------
