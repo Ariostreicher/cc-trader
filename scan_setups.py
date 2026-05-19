@@ -5083,18 +5083,53 @@ def render_html(
         if (clearBtn) clearBtn.style.display = '';
       }}
     }}
+    // Wave 15 — Sync localStorage watchlist → backend so the scanner loop
+    // analyzes these tickers automatically (full 38 detectors + Key Levels
+    // + Fib + Camarilla + Equity + AI commentary).
+    function syncWatchlistToBackend() {{
+      const stars = getStars();
+      return fetch('/api/watchlist', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ tickers: stars }}),
+      }}).catch(function(err) {{ console.warn('watchlist sync failed', err); }});
+    }}
+    function triggerImmediateScan(sym) {{
+      // Wave 15 — Kick a one-shot full scan for the newly-added ticker so it
+      // appears in the main table within seconds, not after the next 5-min
+      // background cycle. Result rendered as a toast + a meta-refresh once
+      // the scanner re-runs naturally.
+      return fetch('/api/scan-now?symbol=' + encodeURIComponent(sym))
+        .then(function(r) {{ return r.json(); }})
+        .then(function(j) {{
+          if (j.error) {{
+            showToast('⚠ ' + sym + ': ' + j.error);
+            return;
+          }}
+          var msg = '🎯 ' + sym + ' analyzed';
+          if (j.setups_count > 0) msg += ' — ' + j.setups_count + ' setup(s) firing!';
+          else                    msg += ' — no setup firing, snapshot ready';
+          showToast(msg);
+        }})
+        .catch(function(err) {{ showToast('⚠ ' + sym + ' scan failed'); }});
+    }}
     function addToMyList() {{
-      const raw = prompt("Add ticker(s) to your watchlist:\\n(comma-separated, e.g.  AAPL, MSFT, BTC-USD, bitcoin, apple)");
+      const raw = prompt("Add ticker(s) to your watchlist:\\n(comma-separated, e.g.  AAPL, MSFT, BTC-USD, bitcoin, apple)\\n\\nThey'll be analyzed automatically (38 detectors + Key Levels + Fib + AI).");
       if (!raw) return;
       const stars = getStars();
+      const added = [];
       raw.split(',').map(x => x.trim()).filter(Boolean).forEach(t => {{
         const sym = t.toUpperCase();
-        if (sym && !stars.includes(sym)) stars.push(sym);
+        if (sym && !stars.includes(sym)) {{ stars.push(sym); added.push(sym); }}
       }});
       saveStars(stars);
       applyStarUI();
       renderMyListBar();
       renderMonitorTable();
+      // Wave 15: persist + immediate analysis for each new ticker
+      syncWatchlistToBackend();
+      added.forEach(function(s) {{ triggerImmediateScan(s); }});
+      if (added.length) showToast('⚡ Scanning ' + added.join(', ') + ' — full CC analysis…');
     }}
     function removeFromMyList(sym) {{
       saveStars(getStars().filter(s => s !== sym));
@@ -5102,6 +5137,7 @@ def render_html(
       renderMyListBar();
       applyFilter();
       renderMonitorTable();
+      syncWatchlistToBackend();
     }}
     function clearMyList() {{
       if (!confirm('Remove ALL tickers from your watchlist?')) return;
@@ -5110,6 +5146,7 @@ def render_html(
       renderMyListBar();
       applyFilter();
       renderMonitorTable();
+      syncWatchlistToBackend();
     }}
     function scanMyList() {{
       const stars = getStars();
@@ -5377,12 +5414,18 @@ def render_html(
       var stars = getStars();
       sym = (sym || '').toUpperCase();
       if (!sym) return;
-      if (stars.indexOf(sym) < 0) stars.push(sym);
+      var isNew = stars.indexOf(sym) < 0;
+      if (isNew) stars.push(sym);
       saveStars(stars);
       applyStarUI();
       renderMyListBar();
       renderMonitorTable();
       showToast('⭐ ' + sym + ' added to your watchlist');
+      // Wave 15 — persist + immediate scan
+      if (isNew) {{
+        syncWatchlistToBackend();
+        triggerImmediateScan(sym);
+      }}
     }}
 
     // --- Manual setup modal ---------------------------------------------
@@ -5791,6 +5834,10 @@ def render_html(
       renderJournal();
       renderManualSetups();
       if (Notification.permission === 'default') Notification.requestPermission();
+      // Wave 15 — sync localStorage → backend on every page load. Render's
+      // disk is ephemeral so this ensures the backend always has the user's
+      // current watchlist (auto-recovers after redeploys).
+      if (typeof syncWatchlistToBackend === 'function') syncWatchlistToBackend();
     }});
   </script>
 </body></html>"""
@@ -7902,6 +7949,105 @@ def render_single_chart_html(
 </body></html>"""
 
 
+# ---------------------------------------------------------------------------
+# Wave 15 — Persisted watchlist (merges with CC_2026 on every scan).
+#
+# When the user adds a ticker to their watchlist on the main page, the
+# frontend POSTs the full list to /api/watchlist which persists it to
+# WATCHLIST_FILE. The background scan loop reads this file before each
+# scan and unions it with CC_2026 so the user's tickers appear in the main
+# table with full CC analysis (38 detectors + Key Levels + Fib + AI + etc.).
+#
+# Render's disk is ephemeral, so the file may disappear on a redeploy. The
+# frontend re-syncs from localStorage → backend on every page load, so the
+# operator never has to re-enter their list — it auto-recovers.
+# ---------------------------------------------------------------------------
+WATCHLIST_FILE = Path(__file__).resolve().parent / "watchlist_persisted.json"
+
+
+def load_persisted_watchlist() -> list[str]:
+    """Read the user's persisted watchlist tickers (returns [] on any error
+    or if the file doesn't exist)."""
+    try:
+        if not WATCHLIST_FILE.exists():
+            return []
+        import json as _json
+        data = _json.loads(WATCHLIST_FILE.read_text())
+        if isinstance(data, dict) and "tickers" in data:
+            tickers = data["tickers"]
+        elif isinstance(data, list):
+            tickers = data
+        else:
+            return []
+        return [str(t).upper().strip() for t in tickers if str(t).strip()]
+    except Exception:
+        return []
+
+
+def save_persisted_watchlist(tickers: list[str]) -> bool:
+    """Persist the user's watchlist tickers. Validates + dedupes + resolves
+    common-name aliases (bitcoin→BTC-USD) before saving. Returns success bool."""
+    try:
+        import json as _json
+        clean: list[str] = []
+        seen: set[str] = set()
+        for raw in tickers or []:
+            sym = resolve_ticker(str(raw)) if raw else None
+            if not sym or not _VALID_TICKER.match(sym):
+                continue
+            if sym in seen:
+                continue
+            seen.add(sym)
+            clean.append(sym)
+        # Cap at 50 so a malicious POST can't blow up the scan loop.
+        clean = clean[:50]
+        payload = {"tickers": clean, "updated_at": datetime.now().isoformat()}
+        WATCHLIST_FILE.write_text(_json.dumps(payload, indent=2))
+        return True
+    except Exception:
+        return False
+
+
+def scan_one_full_response(symbol_raw: str) -> dict:
+    """Wave 15 — On-demand full scan for ONE ticker (used by /api/scan-now).
+    Returns JSON-ready dict with the fired Setup (if any), Snapshot details,
+    Key Levels summary, and a one-line verdict. Triggered when the operator
+    adds a new ticker to their watchlist — they see the analysis immediately
+    instead of waiting for the next background scan cycle."""
+    sym = resolve_ticker(symbol_raw)
+    if not sym or not _VALID_TICKER.match(sym):
+        return {"error": "invalid_symbol", "input": symbol_raw}
+    daily_df, setups, weekly_df = scan_one(sym)
+    if daily_df is None or daily_df.empty:
+        return {"error": "no_data", "symbol": sym}
+    snap = build_snapshot_for_symbol(sym, daily_df, weekly_df=weekly_df)
+    out: dict = {
+        "symbol": sym,
+        "current_price": float(snap.current_price),
+        "ema_55": float(snap.ema_55) if snap.ema_55 is not None else None,
+        "ema_100": float(snap.ema_100) if snap.ema_100 is not None else None,
+        "ema_200": float(snap.ema_200) if snap.ema_200 is not None else None,
+        "rsi_14": float(snap.rsi_14) if snap.rsi_14 is not None else None,
+        "support_levels": [float(x) for x in (snap.support_levels or [])][-3:],
+        "resistance_levels": [float(x) for x in (snap.resistance_levels or [])][-3:],
+        "setups_count": len(setups),
+        "setups": [
+            {
+                "name": s.name, "direction": s.direction,
+                "entry": float(s.entry), "stop": float(s.stop_loss),
+                "targets": [float(t) for t in (s.targets or [])],
+                "conviction": float(s.conviction),
+                "reasoning": s.reasoning, "citation": s.citation,
+            } for s in setups
+        ],
+        "has_fib":   bool(snap.fib),
+        "has_pivots": bool(snap.pivots),
+        "has_camarilla": bool(snap.camarilla),
+        "chart_url": f"/chart?symbol={sym}",
+    }
+    return out
+
+
 def build_all_time_analysis(symbol_raw: str) -> dict:
     """Wave 14 — Run the full detector suite over the ENTIRE price history of
     a ticker (period='max') and compute Fib/SR using the full lookback. This
@@ -8047,6 +8193,21 @@ def serve_live(tickers: list[str], port: int, refresh_seconds: int, cache_second
     }
     state_lock = threading.Lock()
 
+    def _merged_tickers() -> list[str]:
+        """Wave 15 — base CC_2026 universe ∪ user's persisted watchlist.
+        Read fresh on every scan so adding/removing from the watchlist takes
+        effect on the very next cycle (no restart needed)."""
+        extra = load_persisted_watchlist()
+        if not extra:
+            return list(tickers)
+        seen = {t.upper() for t in tickers}
+        merged = list(tickers)
+        for x in extra:
+            if x not in seen:
+                merged.append(x)
+                seen.add(x)
+        return merged
+
     def background_loop():
         while True:
             now = time.time()
@@ -8060,7 +8221,11 @@ def serve_live(tickers: list[str], port: int, refresh_seconds: int, cache_second
                     # always_show=True so every watchlist ticker gets a
                     # snapshot card visible by default, not just the ones
                     # where a setup fired today.
-                    _, _, html = run_full_scan(tickers, always_show=True)
+                    # Wave 15 — merge persisted watchlist on every cycle so
+                    # the user's tickers get the full 38-detector + Key
+                    # Levels + Fib + AI analysis automatically.
+                    active_tickers = _merged_tickers()
+                    _, _, html = run_full_scan(active_tickers, always_show=True)
                     with state_lock:
                         state["html"] = inject_meta_refresh(html, refresh_seconds)
                         state["last_run"] = time.time()
@@ -8074,6 +8239,30 @@ def serve_live(tickers: list[str], port: int, refresh_seconds: int, cache_second
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
             return
+
+        def do_POST(self):
+            # Wave 15 — POST /api/watchlist persists the user's watchlist.
+            import json as _json
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path != "/api/watchlist":
+                self.send_response(404); self.end_headers(); return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length).decode("utf-8") if length else "{}"
+                data = _json.loads(body)
+                tickers_in = data.get("tickers", []) if isinstance(data, dict) else []
+                ok = save_persisted_watchlist(tickers_in)
+                saved = load_persisted_watchlist() if ok else []
+                self.send_response(200 if ok else 500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(_json.dumps({"ok": ok, "tickers": saved}).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(_json.dumps({"ok": False, "error": str(e)}).encode())
 
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
@@ -8181,6 +8370,30 @@ def serve_live(tickers: list[str], port: int, refresh_seconds: int, cache_second
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Cache-Control", "public, max-age=3600")
+                self.end_headers()
+                self.wfile.write(_json.dumps(result, default=float).encode())
+            elif parsed.path == "/api/watchlist":
+                # Wave 15 — Read the persisted watchlist
+                import json as _json
+                tickers_out = load_persisted_watchlist()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(_json.dumps({"tickers": tickers_out}).encode())
+            elif parsed.path == "/api/scan-now":
+                # Wave 15 — On-demand full scan of one ticker. Called by the
+                # frontend right after the user adds a new ticker to the
+                # watchlist so they see CC analysis in seconds, not minutes.
+                import json as _json
+                sym_q = qs.get("symbol", [""])[0].strip()
+                try:
+                    result = scan_one_full_response(sym_q)
+                except Exception as e:
+                    result = {"error": str(e), "symbol": sym_q}
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(_json.dumps(result, default=float).encode())
             elif parsed.path == "/health":
