@@ -5225,12 +5225,88 @@ def render_html(
         }})
         .catch(function(err) {{ showToast('⚠ ' + sym + ' scan failed'); }});
     }}
-    // Wave 17 — Search bar submit handler. Instead of running a temporary
-    // ad-hoc scan that vanishes on reload, ADD the searched ticker(s) to
-    // the persisted watchlist + trigger an immediate full-CC analysis.
-    // After a short delay (so the immediate scan call hits the wire) the
-    // page reloads so the user sees the freshly-analyzed ticker(s) in the
-    // main table — same flow as everything else in CC_2026.
+    // Wave 17 → Wave 22 — Search bar submit handler.
+    // Old behavior: persist + reload, which showed CACHED background-scan
+    // HTML that DIDN'T contain the new ticker yet (background loop runs
+    // every 5 min). User saw 'Added' but the ticker never appeared.
+    // New behavior: persist + scan-now in parallel, then INJECT the result
+    // row directly into the table. No reload, no waiting for the next cycle.
+    function _injectScanRow(j) {{
+      // Build a synthetic <tr> from /api/scan-now JSON and prepend to the
+      // main scan table so the operator sees their freshly-added ticker
+      // immediately. Uses the WATCH purple if no setup fired, else the
+      // first setup's verdict color.
+      var tbody = document.querySelector('table tbody');
+      if (!tbody) return;
+      var sym = j.symbol;
+      var px = (j.current_price || 0).toFixed(2);
+      var primary = (j.setups && j.setups.length) ? j.setups[0] : null;
+      var verdict, vcolor, dir, dirArrow, dirColor, setupName, entry, stop, targets, rr, conv, planHtml;
+      if (primary) {{
+        var entryF = parseFloat(primary.entry);
+        var stopF  = parseFloat(primary.stop);
+        var t1     = (primary.targets && primary.targets.length) ? parseFloat(primary.targets[0]) : entryF;
+        var risk   = Math.abs(entryF - stopF) || 0.001;
+        var rrVal  = Math.abs(t1 - entryF) / risk;
+        verdict   = (rrVal >= 2.0 && primary.conviction >= 0.75) ? 'STRONG TAKE'
+                  : (rrVal >= 1.5 && primary.conviction >= 0.65) ? 'TAKE'
+                  : (rrVal < 1.0) ? 'AVOID' : 'MARGINAL';
+        vcolor    = {{ 'STRONG TAKE':'#22c55e','TAKE':'#86efac','MARGINAL':'#f59e0b','AVOID':'#ef4444' }}[verdict];
+        dir       = primary.direction;
+        dirArrow  = dir === 'long' ? '▲' : '▼';
+        dirColor  = dir === 'long' ? '#22c55e' : '#ef4444';
+        setupName = primary.name;
+        entry     = '$' + entryF.toFixed(2);
+        stop      = '$' + stopF.toFixed(2);
+        targets   = (primary.targets || []).map(function(t) {{ return '$' + parseFloat(t).toFixed(2); }}).join(' · ');
+        rr        = rrVal.toFixed(2) + 'R';
+        conv      = Math.round(primary.conviction * 100) + '%';
+        var holds = dir === 'long' ? 'holds above' : 'holds below';
+        var abort = dir === 'long' ? 'breaks below' : 'breaks above';
+        planHtml  = '🎯 <b>IF ' + holds + ' ' + entry + '</b> → ride <b>' + dir + '</b> to '
+                  + '<span style="color:#22c55e">$' + t1.toFixed(2) + '</span> (' + rrVal.toFixed(1) + 'R). '
+                  + '<b>ABORT</b> if ' + abort + ' <span style="color:#ef4444">' + stop + '</span>. '
+                  + '<i style="color:#94a3b8">📖 ' + (primary.citation || 'CC') + '</i>';
+      }} else {{
+        verdict = '👁 WATCH';  vcolor = '#a78bfa';
+        dir = 'long';  dirArrow = '·';  dirColor = '#94a3b8';
+        setupName = 'Snapshot — no setup firing right now';
+        entry = '—'; stop = '—'; targets = '—'; rr = '—'; conv = '—';
+        planHtml = '⏳ <b>No setup firing yet.</b> Levels computed (EMA 55 $'
+                 + (j.ema_55 ? j.ema_55.toFixed(2) : '—')
+                 + ', EMA 200 $' + (j.ema_200 ? j.ema_200.toFixed(2) : '—')
+                 + ', RSI ' + (j.rsi_14 ? j.rsi_14.toFixed(1) : '—')
+                 + '). Open chart for full CC analysis.';
+      }}
+      var row = document.createElement('tr');
+      row.className = 'setup-row row-' + verdict.toLowerCase().replace(/[\\s👁]/g, '').trim() + ' dir-' + dir;
+      row.setAttribute('data-symbol', sym);
+      row.setAttribute('data-verdict', verdict.toLowerCase().replace(/[\\s👁]/g, '').trim());
+      row.setAttribute('data-direction', dir);
+      row.innerHTML =
+        '<td class="actions"><button class="bell-btn" data-symbol="' + sym
+          + '" data-price="' + px + '" onclick="setAlarm(event,\\'' + sym + '\\',' + px + ')" title="Price alarm">🔔</button></td>'
+        + '<td><span class="verdict-pill" style="background:' + vcolor + ';color:#000">' + verdict + '</span></td>'
+        + '<td><b><a class="sym-link" href="/chart?symbol=' + sym + '" target="_blank" rel="noopener">' + sym + '</a></b></td>'
+        + '<td><a class="open-chart-mini" href="/chart?symbol=' + sym + '" target="_blank" rel="noopener">📊 Open</a></td>'
+        + '<td style="color:' + dirColor + '">' + dirArrow + ' ' + setupName + '</td>'
+        + '<td style="text-align:right">$' + px + '</td>'
+        + '<td style="text-align:right">' + entry + '</td>'
+        + '<td style="text-align:right;color:#ef4444">' + stop + '</td>'
+        + '<td style="text-align:right;color:#22c55e">' + targets + '</td>'
+        + '<td style="text-align:right">' + rr + '</td>'
+        + '<td style="text-align:right">' + conv + '</td>'
+        + '<td style="font-size:11px;color:#cbd5e1;line-height:1.45">' + planHtml + '</td>';
+      // Remove any existing row for this same symbol (replace, don't dupe)
+      var dup = tbody.querySelector('tr[data-symbol="' + sym + '"]');
+      if (dup) dup.remove();
+      // Highlight briefly so the operator sees where it landed
+      row.style.background = 'rgba(167, 139, 250, 0.18)';
+      row.style.transition = 'background 4s ease';
+      tbody.insertBefore(row, tbody.firstChild);
+      setTimeout(function() {{ row.style.background = ''; }}, 100);
+    }}
+
     function handleScanSubmit(ev) {{
       if (ev && ev.preventDefault) ev.preventDefault();
       var input = document.getElementById('search-input');
@@ -5244,18 +5320,35 @@ def render_html(
         if (sym && stars.indexOf(sym) < 0) {{ stars.push(sym); added.push(sym); }}
       }});
       saveStars(stars);
-      // Persist to backend so the next background-scan cycle includes it.
       syncWatchlistToBackend();
-      // Trigger immediate full-CC scan for each new ticker so we get the
-      // analysis without waiting for the 5-min cycle.
-      added.forEach(function(s) {{ triggerImmediateScan(s); }});
-      showToast(added.length
-        ? ('⚡ Added ' + added.join(', ') + ' to watchlist — analyzing now…')
-        : '⭐ Already in watchlist');
       input.value = '';
-      // Wait ~2s for backend POSTs to land + immediate scans to start,
-      // then reload to pick up the merged universe in the next render.
-      setTimeout(function() {{ window.location.href = '/'; }}, 2200);
+      if (!added.length) {{
+        showToast('⭐ Already in watchlist');
+        return false;
+      }}
+      showToast('⚡ Scanning ' + added.join(', ') + ' — ' + added.length + ' ticker(s)…');
+      // Wave 22 — Fetch /api/scan-now for each new ticker and INJECT
+      // the resulting row into the table immediately. No reload, no
+      // waiting for the 5-min background cycle.
+      added.forEach(function(sym) {{
+        fetch('/api/scan-now?symbol=' + encodeURIComponent(sym) + '&t=' + Date.now())
+          .then(function(r) {{ return r.json(); }})
+          .then(function(j) {{
+            if (j.error) {{
+              showToast('⚠ ' + sym + ': ' + j.error);
+              return;
+            }}
+            _injectScanRow(j);
+            var msg = (j.setups_count > 0)
+              ? ('🎯 ' + sym + ' — ' + j.setups_count + ' setup(s) firing!')
+              : ('📊 ' + sym + ' — snapshot ready (no setup firing yet)');
+            showToast(msg);
+          }})
+          .catch(function(err) {{
+            console.error('[CC] scan-now failed for ' + sym, err);
+            showToast('⚠ ' + sym + ' scan failed');
+          }});
+      }});
       return false;
     }}
 
@@ -7734,10 +7827,9 @@ def render_single_chart_html(
         + '<div class="lg-row"><span class="lg-dot" style="background:#64748b"></span> EMA 200</div>'
         + '<div class="lg-row"><span class="lg-px">' + sym + '</span></div>';
       }}
-      // Wave 14 hotfix + Wave 21 timing fix — show ONLY the most recent
-      // N bars on initial load (default TF is 1D, so ~120 bars = ~6 mo).
-      // Deferred two frames so LWC has fully painted before we zoom (else
-      // setVisibleLogicalRange silently fails and we'd fitContent ~4y).
+      // Wave 14 hotfix + Wave 21 + Wave 22 hardening — show ONLY the most
+      // recent N bars on initial load with a verified retry loop so the
+      // zoom always lands even when LWC's time-scale state lags.
       (function() {{
         var defaultBars = {{
           '1m': 60,  '3m': 60,  '5m': 78,  '15m': 52, '30m': 52, '45m': 40,
@@ -7746,20 +7838,29 @@ def render_single_chart_html(
           '3M': 40,  '6M': 20,  '12M': 15, 'ALL': 240,
         }}[defaultTf] || 120;
         var n = initial.candles ? initial.candles.length : 0;
-        function doZoom() {{
+        function doInitZoom(attempt) {{
           try {{
-            if (n > defaultBars) {{
-              chart.timeScale().setVisibleLogicalRange({{ from: n - defaultBars, to: n - 1 }});
-              console.log('[CC] init zoom: tf=' + defaultTf + ', last ' + defaultBars + ' of ' + n);
-            }} else {{
+            if (n <= defaultBars) {{
               chart.timeScale().fitContent();
+              return;
             }}
+            chart.timeScale().setVisibleLogicalRange({{ from: n - defaultBars, to: n - 1 }});
+            var actual = chart.timeScale().getVisibleLogicalRange();
+            var width  = actual ? (actual.to - actual.from) : null;
+            if (width !== null && width > defaultBars * 1.5 && attempt < 5) {{
+              setTimeout(function() {{ doInitZoom(attempt + 1); }}, 80);
+              return;
+            }}
+            console.log('[CC] init zoom OK: tf=' + defaultTf + ', last '
+                      + defaultBars + ' of ' + n + ' (width='
+                      + (width ? width.toFixed(1) : '?') + ', attempt=' + attempt + ')');
           }} catch (e) {{
-            console.warn('[CC] init zoom failed:', e);
-            try {{ chart.timeScale().fitContent(); }} catch(_) {{}}
+            console.warn('[CC] init zoom failed at attempt ' + attempt + ':', e);
+            if (attempt < 5) setTimeout(function() {{ doInitZoom(attempt + 1); }}, 80);
+            else {{ try {{ chart.timeScale().fitContent(); }} catch(_) {{}} }}
           }}
         }}
-        requestAnimationFrame(function() {{ requestAnimationFrame(doZoom); }});
+        setTimeout(function() {{ doInitZoom(1); }}, 50);
       }})();
       new ResizeObserver(function() {{ chart.applyOptions({{ width: div.clientWidth, height: div.clientHeight }}); }}).observe(div);
 
@@ -8081,14 +8182,14 @@ def render_single_chart_html(
 
     function _setDefaultVisibleRange(h, tf, dataLen) {{
       var n = DEFAULT_VISIBLE_BARS[tf] || 120;
-      // Wave 21 — defer the zoom call so LWC finishes ingesting the new
-      // series data before we ask it to zoom. Without this, 1m can return
-      // 2700 bars and setVisibleLogicalRange silently fails (because the
-      // chart's internal time-scale state hasn't caught up yet), then we
-      // fall through to fitContent which displays ALL 2700 bars squashed
-      // — looks like daily candles. requestAnimationFrame fires AFTER
-      // LWC's next paint, which is after the setData completes.
-      function doZoom() {{
+      // Wave 22 — harden the zoom with a retry loop. The previous double-
+      // requestAnimationFrame (~33ms) wasn't enough on slow renders. We
+      // try the zoom every 80ms for up to 5 attempts, verifying via the
+      // chart's actual logical range that the zoom landed. If the zoom
+      // succeeded, we stop. If after 5 tries the chart is still showing
+      // the full dataset, we surrender to fitContent + log so the
+      // operator can see what happened.
+      function doZoom(attempt) {{
         try {{
           if (dataLen <= n) {{
             h.chart.timeScale().fitContent();
@@ -8098,19 +8199,31 @@ def render_single_chart_html(
           var from = dataLen - n;
           var to   = dataLen - 1;
           h.chart.timeScale().setVisibleLogicalRange({{ from: from, to: to }});
-          console.log('[CC] zoom: tf=' + tf + ', visible bars=' + from + '..' + to + ' (' + n + ' of ' + dataLen + ')');
+          // Verify the zoom actually applied — read back the visible range.
+          var actual = h.chart.timeScale().getVisibleLogicalRange();
+          var width  = actual ? (actual.to - actual.from) : null;
+          if (width !== null && width > n * 1.5 && attempt < 5) {{
+            // Zoom did NOT take effect (chart still shows >>n bars).
+            // Retry after 80ms — LWC's internal time-scale state needs
+            // more time after a series rebuild.
+            console.log('[CC] zoom attempt ' + attempt + ' did not stick (width='
+                      + width.toFixed(1) + '), retrying…');
+            setTimeout(function() {{ doZoom(attempt + 1); }}, 80);
+            return;
+          }}
+          console.log('[CC] zoom OK: tf=' + tf + ', visible bars=' + from + '..' + to
+                    + ' (width=' + (width ? width.toFixed(1) : '?') + ', attempt=' + attempt + ')');
         }} catch (e) {{
-          console.warn('[CC] zoom failed, fitContent fallback:', e);
-          try {{ h.chart.timeScale().fitContent(); }} catch(_) {{}}
+          console.warn('[CC] zoom failed at attempt ' + attempt + ':', e);
+          if (attempt < 5) {{
+            setTimeout(function() {{ doZoom(attempt + 1); }}, 80);
+          }} else {{
+            try {{ h.chart.timeScale().fitContent(); }} catch(_) {{}}
+          }}
         }}
       }}
-      // Two-frame defer to be safe: first frame for LWC to paint, second
-      // for the time-scale to settle. Empirically this fixes the 1m-shows-
-      // daily bug because setVisibleLogicalRange wasn't taking effect on
-      // the same tick as setData.
-      requestAnimationFrame(function() {{
-        requestAnimationFrame(doZoom);
-      }});
+      // Initial 50ms delay, then retry up to 5 times every 80ms.
+      setTimeout(function() {{ doZoom(1); }}, 50);
     }}
 
     function _applyTfData(h, tf, tfData) {{

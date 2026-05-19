@@ -48,13 +48,14 @@ html_chart = cc.render_single_chart_html(symbol="XOM", snap=snap, chart_data=cha
 # 1. Deferred zoom via requestAnimationFrame
 # ---------------------------------------------------------------------------
 print("\n[1] Zoom call deferred 2 frames so LWC finishes ingesting setData")
-check("_setDefaultVisibleRange wraps zoom in requestAnimationFrame",
-      "requestAnimationFrame" in html_chart
-      and "_setDefaultVisibleRange" in html_chart)
-check("Two-frame defer (rAF inside rAF)",
-      html_chart.count("requestAnimationFrame") >= 4)
-check("doZoom inner function defined",
-      "function doZoom()" in html_chart)
+check("_setDefaultVisibleRange defined",
+      "_setDefaultVisibleRange" in html_chart)
+# Wave 22 replaced the rAF approach with setTimeout retry loop, which is
+# more robust on slow renders.
+check("Zoom deferred with setTimeout (Wave 22 hardening)",
+      "setTimeout" in html_chart and "doZoom(1)" in html_chart)
+check("doZoom takes attempt arg (Wave 22 retry loop)",
+      "function doZoom(attempt)" in html_chart)
 check("zoom logs final visible range to console",
       "[CC] zoom: tf=" in html_chart)
 check("init-time zoom also deferred",

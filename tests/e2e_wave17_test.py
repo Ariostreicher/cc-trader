@@ -64,8 +64,8 @@ check("shows confirmation toast (added or already-present)",
       "Added " in html_main and "Already in watchlist" in html_main)
 check("clears input field after submit",
       "input.value = ''" in html_main)
-check("reloads to refresh the main scan view",
-      "window.location.href = '/'" in html_main and "setTimeout" in html_main)
+check("Wave 22 — does NOT reload (injects row instead)",
+      "_injectScanRow(" in html_main)
 
 
 # ---------------------------------------------------------------------------
