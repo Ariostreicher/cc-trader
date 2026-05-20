@@ -4649,6 +4649,20 @@ def render_html(
   /* Topbar — search + filters */
   .topbar {{ display:flex; flex-direction:column; gap:10px; margin-bottom:14px; }}
   .search-form {{ display:flex; gap:8px; align-items:center; }}
+  /* Wave 23 — multi-watchlist bar */
+  .watchlists-bar {{ display:flex; flex-wrap:wrap; gap:8px; padding:10px 14px; background:#0f172a; border:1px solid #1e293b; border-radius:8px; align-items:center; font-size:12px; margin-bottom:10px; }}
+  .watchlists-bar .wl-label {{ color:#fbbf24; font-weight:700; font-size:11px; text-transform:uppercase; letter-spacing:0.6px; }}
+  .watchlists-bar .wl-select {{ padding:6px 12px; border-radius:6px; border:1px solid #1e293b; background:#0a0f1c; color:#e2e8f0; font-size:12px; font-family:ui-monospace,monospace; cursor:pointer; min-width:200px; }}
+  .watchlists-bar .wl-select:hover {{ border-color:#fbbf24; }}
+  .watchlists-bar .wl-btn {{ padding:6px 12px; border-radius:6px; border:1px solid #22c55e; background:transparent; color:#22c55e; cursor:pointer; font-size:11px; font-weight:600; }}
+  .watchlists-bar .wl-btn:hover {{ background:#22c55e; color:#000; }}
+  .watchlists-bar .wl-btn.danger {{ border-color:#ef4444; color:#ef4444; }}
+  .watchlists-bar .wl-btn.danger:hover {{ background:#ef4444; color:#000; }}
+  .watchlists-bar .wl-chips {{ display:flex; flex-wrap:wrap; gap:4px; padding-left:8px; flex:1; min-width:0; }}
+  .watchlists-bar .wl-chip {{ display:inline-flex; align-items:center; gap:4px; padding:3px 8px; background:#1e1b4b; color:#a78bfa; border-radius:12px; font-size:11px; font-family:ui-monospace,monospace; }}
+  .watchlists-bar .wl-chip .x {{ cursor:pointer; color:#94a3b8; font-size:10px; }}
+  .watchlists-bar .wl-chip .x:hover {{ color:#ef4444; }}
+  .watchlists-bar .wl-empty {{ color:#64748b; font-style:italic; padding-left:8px; }}
   .search-form input {{ flex:1; max-width:560px; padding:9px 14px; border-radius:8px; border:1px solid #1e293b; background:#0f172a; color:#e2e8f0; font-size:13px; }}
   .search-form button {{ padding:9px 18px; border:0; border-radius:8px; background:#22c55e; color:#000; font-weight:700; cursor:pointer; }}
   .search-form button:hover {{ background:#16a34a; }}
@@ -4803,18 +4817,23 @@ def render_html(
   </div>
 
   <div class="topbar">
+    <!-- Wave 23 — Multiple named watchlists row (up to 10). -->
+    <div class="watchlists-bar">
+      <span class="wl-label">📋 List:</span>
+      <select id="wl-active-select" onchange="onWatchlistSelectChange()" class="wl-select"></select>
+      <button class="wl-btn" onclick="createWatchlist()" title="Create a new named list (max 10)">+ New list</button>
+      <button class="wl-btn" onclick="renameActiveWatchlist()" title="Rename current list">✎ Rename</button>
+      <button class="wl-btn danger" onclick="deleteActiveWatchlist()" title="Delete current list">🗑 Delete</button>
+      <span id="wl-chips" class="wl-chips"></span>
+    </div>
+
     <form method="GET" action="/" class="search-form" id="search-form" onsubmit="return handleScanSubmit(event);">
       <input name="symbols" id="search-input" list="ticker-suggestions"
-             placeholder="🔍 Add to watchlist — type 'bitcoin', 'apple', 'GLD', 'AAPL', 'BTC-USD'..." autocomplete="off"/>
+             placeholder="🔍 Add ticker to your active list — type 'bitcoin', 'apple', 'GLD', 'AAPL'..." autocomplete="off"/>
       <datalist id="ticker-suggestions">{ticker_suggestions_html}</datalist>
       <button type="submit">Add & Scan</button>
       <a href="/" class="reset-link">↩ Default watchlist</a>
     </form>
-
-    <!-- Wave 20 — Removed the redundant 'My Watchlist' bar.
-         There's now ONE list: the default universe (CC_2026) + whatever
-         tickers you typed into 'Add & Scan'. Persistence is invisible to
-         the operator (stored server-side in watchlist_persisted.json). -->
 
     <div class="filter-bar">
       <button class="filter-btn active" data-filter="all">All</button>
@@ -5195,16 +5214,165 @@ def render_html(
     // mirror what was typed into localStorage (so the page-load sync to
     // /api/watchlist still works). No DOM element to render anymore.
     function renderMyListBar() {{ /* no-op since Wave 20 */ }}
-    // Wave 15 — Sync localStorage watchlist → backend so the scanner loop
-    // analyzes these tickers automatically (full 38 detectors + Key Levels
-    // + Fib + Camarilla + Equity + AI commentary).
-    function syncWatchlistToBackend() {{
-      const stars = getStars();
-      return fetch('/api/watchlist', {{
+    // ----- Wave 23 — Multi-watchlist state ----------------------------
+    // State shape (localStorage 'cc_watchlists'):
+    //   lists is an object mapping name to ticker-array, plus an 'active'
+    //   key naming which list is currently selected.
+    // The dropdown reads 'active' to know which list 'Add & Scan' inserts
+    // into. The 'getStars()' / 'saveStars()' helpers below are wrappers
+    // around the ACTIVE list so all the legacy add-ticker code keeps
+    // working unchanged.
+    var WL_DEFAULT_NAME = 'My Watchlist';
+    var WL_MAX = 10;
+    function getWatchlists() {{
+      try {{
+        var raw = localStorage.getItem('cc_watchlists');
+        if (raw) {{
+          var d = JSON.parse(raw);
+          if (d && d.lists && typeof d.lists === 'object') {{
+            if (!d.active || !(d.active in d.lists)) {{
+              d.active = Object.keys(d.lists)[0] || WL_DEFAULT_NAME;
+            }}
+            return d;
+          }}
+        }}
+      }} catch(_) {{}}
+      // Migrate from legacy cc_stars flat list if present
+      var legacy = null;
+      try {{ legacy = JSON.parse(localStorage.getItem('cc_stars') || '[]'); }} catch(_) {{}}
+      var lists = {{}};
+      lists[WL_DEFAULT_NAME] = Array.isArray(legacy) ? legacy : [];
+      return {{ lists: lists, active: WL_DEFAULT_NAME }};
+    }}
+    function saveWatchlists(d) {{
+      try {{ localStorage.setItem('cc_watchlists', JSON.stringify(d)); }} catch(_) {{}}
+      // Also keep legacy cc_stars in sync (= active list) for any old
+      // code path that still reads it.
+      try {{ localStorage.setItem('cc_stars', JSON.stringify(d.lists[d.active] || [])); }} catch(_) {{}}
+    }}
+    function syncWatchlistsToBackend() {{
+      var d = getWatchlists();
+      return fetch('/api/watchlists', {{
         method: 'POST',
         headers: {{ 'Content-Type': 'application/json' }},
-        body: JSON.stringify({{ tickers: stars }}),
-      }}).catch(function(err) {{ console.warn('watchlist sync failed', err); }});
+        body: JSON.stringify(d),
+      }}).catch(function(err) {{ console.warn('multi-watchlist sync failed', err); }});
+    }}
+
+    function renderWatchlistsUI() {{
+      var d = getWatchlists();
+      var sel = document.getElementById('wl-active-select');
+      if (sel) {{
+        sel.innerHTML = Object.keys(d.lists).map(function(name) {{
+          var n = (d.lists[name] || []).length;
+          var label = name + ' (' + n + ')';
+          return '<option value="' + name.replace(/"/g, '&quot;') + '"'
+                 + (name === d.active ? ' selected' : '') + '>' + label + '</option>';
+        }}).join('');
+      }}
+      var chipsEl = document.getElementById('wl-chips');
+      if (chipsEl) {{
+        var tickers = d.lists[d.active] || [];
+        if (!tickers.length) {{
+          chipsEl.innerHTML = '<span class="wl-empty">Empty — type a ticker in the search bar to add</span>';
+        }} else {{
+          chipsEl.innerHTML = tickers.map(function(t) {{
+            return '<span class="wl-chip">' + t
+                 + ' <span class="x" onclick="removeFromActiveList(\\'' + t + '\\')" title="Remove">✕</span>'
+                 + '</span>';
+          }}).join('');
+        }}
+      }}
+      // Update search-bar placeholder to reflect active list.
+      var inp = document.getElementById('search-input');
+      if (inp) inp.placeholder = '🔍 Add ticker to "' + d.active + '" — type AAPL, bitcoin, GLD…';
+    }}
+
+    function onWatchlistSelectChange() {{
+      var sel = document.getElementById('wl-active-select');
+      var d = getWatchlists();
+      if (!sel || !(sel.value in d.lists)) return;
+      d.active = sel.value;
+      saveWatchlists(d);
+      syncWatchlistsToBackend();
+      renderWatchlistsUI();
+      showToast('📋 Active list: ' + d.active);
+    }}
+
+    function createWatchlist() {{
+      var d = getWatchlists();
+      if (Object.keys(d.lists).length >= WL_MAX) {{
+        return alert('Max ' + WL_MAX + ' lists reached. Delete one first.');
+      }}
+      var name = prompt('Name for the new list (e.g. "Future Buys", "Current Holdings"):');
+      if (!name) return;
+      name = name.trim().slice(0, 40);
+      if (!name) return;
+      if (name in d.lists) return alert('A list named "' + name + '" already exists.');
+      d.lists[name] = [];
+      d.active = name;
+      saveWatchlists(d);
+      syncWatchlistsToBackend();
+      renderWatchlistsUI();
+      showToast('✓ Created list "' + name + '" and set as active');
+    }}
+
+    function renameActiveWatchlist() {{
+      var d = getWatchlists();
+      var current = d.active;
+      var name = prompt('Rename "' + current + '" to:', current);
+      if (!name) return;
+      name = name.trim().slice(0, 40);
+      if (!name || name === current) return;
+      if (name in d.lists) return alert('A list named "' + name + '" already exists.');
+      d.lists[name] = d.lists[current];
+      delete d.lists[current];
+      d.active = name;
+      saveWatchlists(d);
+      syncWatchlistsToBackend();
+      renderWatchlistsUI();
+      showToast('✓ Renamed to "' + name + '"');
+    }}
+
+    function deleteActiveWatchlist() {{
+      var d = getWatchlists();
+      var name = d.active;
+      if (Object.keys(d.lists).length <= 1) {{
+        return alert('Cannot delete the last list. Rename it or add another first.');
+      }}
+      if (!confirm('Delete list "' + name + '" with ' + (d.lists[name] || []).length + ' ticker(s)? Tickers in OTHER lists are kept.')) return;
+      delete d.lists[name];
+      d.active = Object.keys(d.lists)[0];
+      saveWatchlists(d);
+      syncWatchlistsToBackend();
+      renderWatchlistsUI();
+      showToast('🗑 Deleted "' + name + '"');
+    }}
+
+    function removeFromActiveList(sym) {{
+      var d = getWatchlists();
+      var arr = d.lists[d.active] || [];
+      d.lists[d.active] = arr.filter(function(t) {{ return t !== sym; }});
+      saveWatchlists(d);
+      syncWatchlistsToBackend();
+      renderWatchlistsUI();
+    }}
+
+    // ----- Active-list wrappers (legacy 'stars' API) -------------------
+    function getStars() {{
+      var d = getWatchlists();
+      return (d.lists[d.active] || []).slice();
+    }}
+    function saveStars(arr) {{
+      var d = getWatchlists();
+      d.lists[d.active] = arr || [];
+      saveWatchlists(d);
+    }}
+    // Legacy single-list backend sync — kept for any code path that still
+    // calls it. Wave 23 prefers syncWatchlistsToBackend() but this alias
+    // still works (it POSTs ALL lists, not just one).
+    function syncWatchlistToBackend() {{
+      return syncWatchlistsToBackend();
     }}
     function triggerImmediateScan(sym) {{
       // Wave 15 — Kick a one-shot full scan for the newly-added ticker so it
@@ -5321,12 +5489,14 @@ def render_html(
       }});
       saveStars(stars);
       syncWatchlistToBackend();
+      renderWatchlistsUI();  // Wave 23 — refresh chips so the new ticker shows up.
       input.value = '';
       if (!added.length) {{
-        showToast('⭐ Already in watchlist');
+        showToast('⭐ Already in active list');
         return false;
       }}
-      showToast('⚡ Scanning ' + added.join(', ') + ' — ' + added.length + ' ticker(s)…');
+      var d = getWatchlists();
+      showToast('⚡ Added ' + added.join(', ') + ' to "' + d.active + '" — scanning…');
       // Wave 22 — Fetch /api/scan-now for each new ticker and INJECT
       // the resulting row into the table immediately. No reload, no
       // waiting for the 5-min background cycle.
@@ -6043,6 +6213,15 @@ def render_html(
       // disk is ephemeral so this ensures the backend always has the user's
       // current watchlist (auto-recovers after redeploys).
       if (typeof syncWatchlistToBackend === 'function') syncWatchlistToBackend();
+      // Wave 23 — Hydrate the multi-watchlist UI. Fetch backend state and
+      // merge with localStorage (backend is source of truth for lists +
+      // active selection; localStorage is the cache for offline reads).
+      fetch('/api/watchlists').then(function(r) {{ return r.json(); }}).then(function(server) {{
+        if (server && server.lists && Object.keys(server.lists).length) {{
+          saveWatchlists(server);
+        }}
+        renderWatchlistsUI();
+      }}).catch(function() {{ renderWatchlistsUI(); }});
     }});
   </script>
 </body></html>"""
@@ -8406,62 +8585,157 @@ def render_single_chart_html(
 
 
 # ---------------------------------------------------------------------------
-# Wave 15 — Persisted watchlist (merges with CC_2026 on every scan).
+# Wave 15 + Wave 23 — Persisted watchlists (MULTIPLE named lists).
 #
-# When the user adds a ticker to their watchlist on the main page, the
-# frontend POSTs the full list to /api/watchlist which persists it to
-# WATCHLIST_FILE. The background scan loop reads this file before each
-# scan and unions it with CC_2026 so the user's tickers appear in the main
-# table with full CC analysis (38 detectors + Key Levels + Fib + AI + etc.).
+# Wave 23 upgrades the single-flat-list to a dict of up to 10 user-named
+# watchlists, like typical trading platforms:
+#     {
+#       "lists": {
+#         "Future Buys":      ["LULU", "AAPL"],
+#         "Current Holdings": ["MSFT"],
+#         "Potential":        ["BTC-USD"],
+#       },
+#       "active": "Future Buys",
+#       "updated_at": "...",
+#     }
 #
-# Render's disk is ephemeral, so the file may disappear on a redeploy. The
-# frontend re-syncs from localStorage → backend on every page load, so the
-# operator never has to re-enter their list — it auto-recovers.
+# The scan-universe used by the background loop is CC_2026 ∪ (union of
+# every list's tickers), so a ticker in ANY list gets full CC analysis.
+#
+# Backward compatibility: if the file is in the OLD flat shape
+# ({"tickers": [...]}) we transparently migrate it into a default list
+# called 'My Watchlist' so existing users don't lose anything.
 # ---------------------------------------------------------------------------
 WATCHLIST_FILE = Path(__file__).resolve().parent / "watchlist_persisted.json"
+MAX_WATCHLISTS = 10
+MAX_TICKERS_PER_LIST = 50
+DEFAULT_LIST_NAME = "My Watchlist"
 
 
-def load_persisted_watchlist() -> list[str]:
-    """Read the user's persisted watchlist tickers (returns [] on any error
-    or if the file doesn't exist)."""
+def _sanitize_list_name(name: str) -> str:
+    """Strip + truncate watchlist name. Allowed chars only."""
+    if not isinstance(name, str):
+        return ""
+    n = name.strip()[:40]
+    return n
+
+
+def load_watchlists() -> dict:
+    """Read the user's persisted watchlists. Always returns a dict with
+    'lists', 'active', and 'updated_at' keys. Migrates legacy single-list
+    files automatically."""
+    default = {"lists": {DEFAULT_LIST_NAME: []}, "active": DEFAULT_LIST_NAME,
+               "updated_at": datetime.now().isoformat()}
     try:
         if not WATCHLIST_FILE.exists():
-            return []
+            return default
         import json as _json
         data = _json.loads(WATCHLIST_FILE.read_text())
-        if isinstance(data, dict) and "tickers" in data:
-            tickers = data["tickers"]
-        elif isinstance(data, list):
-            tickers = data
-        else:
-            return []
-        return [str(t).upper().strip() for t in tickers if str(t).strip()]
+        # Legacy flat format → migrate
+        if isinstance(data, dict) and "tickers" in data and "lists" not in data:
+            tickers = data.get("tickers") or []
+            return {"lists": {DEFAULT_LIST_NAME: [str(t).upper().strip()
+                              for t in tickers if str(t).strip()]},
+                    "active": DEFAULT_LIST_NAME,
+                    "updated_at": data.get("updated_at",
+                                            datetime.now().isoformat())}
+        if isinstance(data, list):
+            return {"lists": {DEFAULT_LIST_NAME: [str(t).upper().strip()
+                              for t in data if str(t).strip()]},
+                    "active": DEFAULT_LIST_NAME,
+                    "updated_at": datetime.now().isoformat()}
+        # New Wave 23 format
+        if isinstance(data, dict) and "lists" in data and isinstance(data["lists"], dict):
+            lists_out: dict[str, list[str]] = {}
+            for name, tickers in data["lists"].items():
+                clean_name = _sanitize_list_name(name)
+                if not clean_name:
+                    continue
+                lists_out[clean_name] = [str(t).upper().strip()
+                                          for t in (tickers or []) if str(t).strip()]
+            if not lists_out:
+                return default
+            active = data.get("active")
+            if active not in lists_out:
+                active = next(iter(lists_out))
+            return {"lists": lists_out, "active": active,
+                    "updated_at": data.get("updated_at",
+                                            datetime.now().isoformat())}
+        return default
     except Exception:
-        return []
+        return default
 
 
-def save_persisted_watchlist(tickers: list[str]) -> bool:
-    """Persist the user's watchlist tickers. Validates + dedupes + resolves
-    common-name aliases (bitcoin→BTC-USD) before saving. Returns success bool."""
+def save_watchlists(payload: dict) -> bool:
+    """Persist the multi-list watchlist payload. Validates names, dedupes
+    tickers per-list, resolves aliases, caps to MAX_WATCHLISTS lists and
+    MAX_TICKERS_PER_LIST per list."""
     try:
         import json as _json
-        clean: list[str] = []
-        seen: set[str] = set()
-        for raw in tickers or []:
-            sym = resolve_ticker(str(raw)) if raw else None
-            if not sym or not _VALID_TICKER.match(sym):
+        if not isinstance(payload, dict):
+            return False
+        lists_in = payload.get("lists") or {}
+        if not isinstance(lists_in, dict):
+            return False
+        clean_lists: dict[str, list[str]] = {}
+        for name, tickers in list(lists_in.items())[:MAX_WATCHLISTS]:
+            clean_name = _sanitize_list_name(name)
+            if not clean_name:
                 continue
-            if sym in seen:
-                continue
-            seen.add(sym)
-            clean.append(sym)
-        # Cap at 50 so a malicious POST can't blow up the scan loop.
-        clean = clean[:50]
-        payload = {"tickers": clean, "updated_at": datetime.now().isoformat()}
-        WATCHLIST_FILE.write_text(_json.dumps(payload, indent=2))
+            seen: set[str] = set()
+            clean: list[str] = []
+            for raw in tickers or []:
+                sym = resolve_ticker(str(raw)) if raw else None
+                if not sym or not _VALID_TICKER.match(sym):
+                    continue
+                if sym in seen:
+                    continue
+                seen.add(sym)
+                clean.append(sym)
+            clean_lists[clean_name] = clean[:MAX_TICKERS_PER_LIST]
+        if not clean_lists:
+            clean_lists[DEFAULT_LIST_NAME] = []
+        active = _sanitize_list_name(payload.get("active") or "")
+        if active not in clean_lists:
+            active = next(iter(clean_lists))
+        out = {"lists": clean_lists, "active": active,
+               "updated_at": datetime.now().isoformat()}
+        WATCHLIST_FILE.write_text(_json.dumps(out, indent=2))
         return True
     except Exception:
         return False
+
+
+def all_watchlist_tickers() -> list[str]:
+    """Union of every ticker across every persisted list — used by the
+    background scan to know what to analyze beyond CC_2026."""
+    data = load_watchlists()
+    seen: set[str] = set()
+    out: list[str] = []
+    for tickers in data["lists"].values():
+        for t in tickers:
+            if t not in seen:
+                seen.add(t)
+                out.append(t)
+    return out
+
+
+# Backwards-compatibility helpers — keep the old API surface working so
+# any existing code path (the search-bar /api/watchlist POST flow from
+# Wave 15-22) still functions. They now operate on the ACTIVE list.
+def load_persisted_watchlist() -> list[str]:
+    """Returns tickers in the currently-active list."""
+    data = load_watchlists()
+    return data["lists"].get(data["active"], [])
+
+
+def save_persisted_watchlist(tickers: list[str]) -> bool:
+    """Replaces the currently-active list's tickers (legacy single-list
+    flow used by syncWatchlistToBackend before Wave 23 UI)."""
+    data = load_watchlists()
+    active = data["active"]
+    data["lists"][active] = tickers or []
+    return save_watchlists(data)
 
 
 def scan_one_full_response(symbol_raw: str) -> dict:
@@ -8650,10 +8924,10 @@ def serve_live(tickers: list[str], port: int, refresh_seconds: int, cache_second
     state_lock = threading.Lock()
 
     def _merged_tickers() -> list[str]:
-        """Wave 15 — base CC_2026 universe ∪ user's persisted watchlist.
-        Read fresh on every scan so adding/removing from the watchlist takes
-        effect on the very next cycle (no restart needed)."""
-        extra = load_persisted_watchlist()
+        """Wave 15 + Wave 23 — base CC_2026 universe ∪ union of EVERY
+        named watchlist. Read fresh on every scan so adding/removing
+        from any list takes effect on the very next cycle."""
+        extra = all_watchlist_tickers()
         if not extra:
             return list(tickers)
         seen = {t.upper() for t in tickers}
@@ -8697,15 +8971,22 @@ def serve_live(tickers: list[str], port: int, refresh_seconds: int, cache_second
             return
 
         def do_POST(self):
-            # Wave 15 — POST /api/watchlist persists the user's watchlist.
+            # Wave 15 — POST /api/watchlist (legacy single-list flow).
+            # Wave 23 — POST /api/watchlists (multi-list save).
             import json as _json
             parsed = urllib.parse.urlparse(self.path)
-            if parsed.path != "/api/watchlist":
-                self.send_response(404); self.end_headers(); return
             try:
                 length = int(self.headers.get("Content-Length") or 0)
                 body = self.rfile.read(length).decode("utf-8") if length else "{}"
                 data = _json.loads(body)
+            except Exception as e:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(_json.dumps({"ok": False, "error": str(e)}).encode())
+                return
+            if parsed.path == "/api/watchlist":
+                # Legacy: replaces tickers in the ACTIVE list.
                 tickers_in = data.get("tickers", []) if isinstance(data, dict) else []
                 ok = save_persisted_watchlist(tickers_in)
                 saved = load_persisted_watchlist() if ok else []
@@ -8714,11 +8995,19 @@ def serve_live(tickers: list[str], port: int, refresh_seconds: int, cache_second
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(_json.dumps({"ok": ok, "tickers": saved}).encode())
-            except Exception as e:
-                self.send_response(400)
+                return
+            if parsed.path == "/api/watchlists":
+                # Wave 23: replaces the FULL multi-list state.
+                ok = save_watchlists(data)
+                saved = load_watchlists()
+                self.send_response(200 if ok else 500)
                 self.send_header("Content-Type", "application/json")
+                self.send_header("Cache-Control", "no-store")
                 self.end_headers()
-                self.wfile.write(_json.dumps({"ok": False, "error": str(e)}).encode())
+                self.wfile.write(_json.dumps({"ok": ok, **saved}).encode())
+                return
+            self.send_response(404)
+            self.end_headers()
 
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
@@ -8831,7 +9120,8 @@ def serve_live(tickers: list[str], port: int, refresh_seconds: int, cache_second
                 self.end_headers()
                 self.wfile.write(_json.dumps(result, default=float).encode())
             elif parsed.path == "/api/watchlist":
-                # Wave 15 — Read the persisted watchlist
+                # Wave 15 — Read the persisted watchlist (active list only,
+                # for backwards-compat with the search-bar sync flow).
                 import json as _json
                 tickers_out = load_persisted_watchlist()
                 self.send_response(200)
@@ -8839,6 +9129,15 @@ def serve_live(tickers: list[str], port: int, refresh_seconds: int, cache_second
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(_json.dumps({"tickers": tickers_out}).encode())
+            elif parsed.path == "/api/watchlists":
+                # Wave 23 — Read ALL persisted watchlists + active selection.
+                import json as _json
+                data = load_watchlists()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(_json.dumps(data).encode())
             elif parsed.path == "/api/scan-now":
                 # Wave 15 — On-demand full scan of one ticker. Called by the
                 # frontend right after the user adds a new ticker to the

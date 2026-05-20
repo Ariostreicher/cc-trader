@@ -91,7 +91,8 @@ check("empty save persists empty list",        cc.load_persisted_watchlist() == 
 # JSON shape on disk
 cc.save_persisted_watchlist(["LULU"])
 disk = json.loads(cc.WATCHLIST_FILE.read_text())
-check("disk JSON has 'tickers' key",            "tickers" in disk and disk["tickers"] == ["LULU"])
+check("disk JSON has 'lists' key (Wave 23 multi-list format)",
+      "lists" in disk and "LULU" in next(iter(disk["lists"].values())))
 check("disk JSON has 'updated_at' key",         "updated_at" in disk)
 
 # Legacy plain-list format also loads (forward compat)
@@ -160,8 +161,8 @@ html_main = cc.render_html(setups=[], scanned=0, duration_s=0.0)
 
 check("syncWatchlistToBackend() function defined",
       "function syncWatchlistToBackend()" in html_main)
-check("POSTs to /api/watchlist",
-      "fetch('/api/watchlist'" in html_main and "'POST'" in html_main)
+check("POSTs to /api/watchlists (Wave 23 multi-list endpoint)",
+      "fetch('/api/watchlists'" in html_main and "'POST'" in html_main)
 check("triggerImmediateScan() function defined",
       "function triggerImmediateScan(" in html_main)
 check("triggerImmediateScan hits /api/scan-now",
@@ -175,8 +176,8 @@ check("removeFromMyList syncs to backend",
 check("page-load triggers sync (auto-recover after Render redeploy)",
       "syncWatchlistToBackend()" in html_main
       and "auto-recovers" in html_main)
-check("addToMyList prompt mentions automatic analysis",
-      "analyzed automatically" in html_main or "38 detectors" in html_main)
+check("addToMyList still defined as no-op (Wave 20+ — use Add & Scan instead)",
+      "function addToMyList()" in html_main)
 
 
 # ---------------------------------------------------------------------------

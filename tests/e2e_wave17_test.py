@@ -38,8 +38,8 @@ check("form still has id 'search-form'",
       'id="search-form"' in html_main)
 check("submit button renamed to 'Add & Scan'",
       "Add &amp; Scan" in html_main or "Add & Scan" in html_main)
-check("placeholder updated to 'Add to watchlist'",
-      "Add to watchlist" in html_main)
+check("placeholder mentions adding a ticker (Wave 23: 'active list')",
+      "Add ticker to" in html_main or "Add to watchlist" in html_main)
 
 
 # ---------------------------------------------------------------------------
@@ -60,8 +60,8 @@ check("persists list via syncWatchlistToBackend()",
       "syncWatchlistToBackend()" in html_main)
 check("triggers immediate scan for each new ticker",
       "triggerImmediateScan(" in html_main)
-check("shows confirmation toast (added or already-present)",
-      "Added " in html_main and "Already in watchlist" in html_main)
+check("shows confirmation toast (Wave 23: 'Added X to <list>' or 'Already in active list')",
+      "Added " in html_main and "Already in active list" in html_main)
 check("clears input field after submit",
       "input.value = ''" in html_main)
 check("Wave 22 — does NOT reload (injects row instead)",
